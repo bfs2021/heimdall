@@ -17,6 +17,13 @@ export default defineConfig({
       '@tinkermonkey/heimdall-ui': path.resolve(__dirname, './src/index.ts'),
     },
   },
+  // Only scan the dev app's own entry. By default Vite crawls every .html file
+  // in the repo (docs/, test-app/, design-reference/), and docs/ has its own
+  // node_modules — so a bare `react` import could resolve to docs' copy and
+  // bundle two Reacts, which crashes hooks ("Invalid hook call").
+  optimizeDeps: {
+    entries: ['index.html'],
+  },
   server: {
     host: '127.0.0.1',
     port: 5173,
