@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.8.1]
 
+### Fixed
+
+- **`GraphCanvas`** — `layout="force-clustered"` no longer smears clusters into each other on
+  dense graphs. Each Louvain cluster is now laid out on its own (internal edges only), clusters
+  are spaced by their real size, and each cluster is rotated to face the clusters it connects
+  to. On the college-football benchmark (115 nodes, 613 edges) node overlaps go from 53 to 0
+  and overlapping cluster bubbles from 93% to 2%; layout is also 2-10x faster.
+
 ### Added
 
 - **`ChatComposer`** — `enterBehavior` prop (`'send' | 'newline'`, default `'send'`): controls Enter key behavior in the message textarea. When set to `'send'`, bare Enter submits the message and Shift+Enter inserts a newline (default behavior). When set to `'newline'`, bare Enter inserts a newline and Shift+Enter also inserts a newline — Submit only via the Send button. Enables touch-friendly and mobile-optimized input modes without forking or DOM-patching the component. The shortcut hint text automatically hides desktop-specific wording when `enterBehavior='newline'`.
