@@ -587,7 +587,9 @@ export interface GraphCanvasProps extends Omit<
    */
   edgePopover?: (edge: GraphEdge) => React.ReactNode;
   /** 'manual' relies on explicit x/y per node. 'force' runs a spring layout for nodes without
-   *  explicit coordinates. 'galaxy' arranges nodes as a radial hierarchy of orbits, built from
+   *  explicit coordinates. 'organic' is its successor: stress majorization with guaranteed
+   *  overlap removal (see utils/organicLayout.ts), deterministic, no overlaps, nodeMargin honored
+   *  as a hard minimum gap. 'galaxy' arranges nodes as a radial hierarchy of orbits, built from
    *  structural edges (see isStructuralEdge). 'force-clustered' additionally groups nodes into
    *  nested bubbles by graph structure (see clusteredForceLayout in utils/graphLayout) before
    *  running the same spring simulation within each bubble — larger canvas, less-even
@@ -601,7 +603,7 @@ export interface GraphCanvasProps extends Omit<
    *  overlap. */
   layout?: "manual" | "force" | "organic" | "galaxy" | "force-clustered" | "ux-navigation" | "radial-tree";
   /**
-   * layout="force" | "galaxy". Extra breathing room kept clear around each node's own footprint,
+   * layout="force" | "organic" | "galaxy". Extra breathing room kept clear around each node's own footprint,
    * on top of what's needed to just avoid overlap — this is what leaves room for an edge to be
    * visible between two connected nodes instead of their boxes settling nearly flush, which with
    * substantial cards (renderNode content) could otherwise read as if edges were missing
@@ -609,8 +611,10 @@ export interface GraphCanvasProps extends Omit<
    * (scales sensibly for both compact chips and larger cards with no configuration — see
    * ForceLayoutOptions.nodeMargin). "galaxy" leaves it unset by default and uses its own gap
    * (0.6 × the median body radius, at least 12 px); a number given here REPLACES that gap, so
-   * 0 means systems and bodies touch — see GalaxyLayoutOptions.nodeMargin. Pass a fixed number
-   * for either engine to use the same margin for every node.
+   * 0 means systems and bodies touch — see GalaxyLayoutOptions.nodeMargin. "organic" passes it
+   * through as OrganicLayoutOptions.minimumNodeDistance, a guaranteed smallest box-to-box gap
+   * (default 24 px, not the node's width). Pass a fixed number for any engine to use the same
+   * margin for every node.
    */
   nodeMargin?: number;
   /**
@@ -1287,10 +1291,10 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
           source: e.sourceId,
           target: e.targetId,
         }));
-        // organicLayout reads node x/y as a sketch only when every node has coordinates and the
-        // layout already honors its post-conditions; nodes without explicit coordinates get NaN
-        // (not the circle seed above) so a first render is always a cold, MDS-seeded solve, and a
-        // node the caller positioned is pinned.
+        // organicLayout reads node x/y as a sketch only when at least 70% of nodes have
+        // coordinates and the placed nodes already honor its post-conditions; nodes without
+        // explicit coordinates get NaN (not the circle seed above) so a first render is always a
+        // cold, MDS-seeded solve, and a node the caller positioned is pinned and held exactly.
         const organicNodes = visibleNodes.map((n) => ({
           id: n.id,
           x: n.x ?? NaN,

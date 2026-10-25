@@ -27,8 +27,15 @@ import type { LayoutNode, LayoutEdge } from './graphLayout'
  * untouched — which is what makes re-running the engine on its own output a no-op and what
  * animated transitions need. A start whose positioned nodes overlap or sit closer than
  * minimumNodeDistance (e.g. GraphCanvas's circle seed) is not a sketch and is solved cold.
- * Pinned nodes are never moved by the stress solve; the overlap stage may still shift them
- * (documented limitation of this POC).
+ * Note that a valid sketch with no new nodes and no affectedIds is returned unchanged: a caller
+ * that changed the graph (removed a node, re-wired an edge) names the nodes to re-settle in
+ * `affectedIds`, or asks for `scope: 'all'`.
+ *
+ * Pinned nodes (`pinned: true` with finite x/y) are never moved by the stress solve. On a cold
+ * start each component's MDS frame is rigidly aligned onto its pins, and a component with pins
+ * keeps its absolute place while the other components are packed beside it. The overlap stage
+ * grows its tree from a pinned root, which never moves; a second pin in the same component can
+ * still be displaced if the two pins conflict with the no-overlap post-condition, which wins.
  */
 export interface OrganicLayoutOptions {
   /** Ideal length of an edge in px (default 160). */
@@ -168,36 +175,45 @@ export function organicLayout(
     components.push(members)
   }
 
-  // Warm start detection: a sketch is a fully positioned layout that already honors the
+  // Warm start detection: a sketch is a (mostly) positioned layout that already honors the
   // post-conditions. Anything else (NaN coordinates, overlaps, a circle seed) is solved cold.
   const scope = options.scope ?? 'auto'
   const valid = mostPositioned && !anyTooClose(boxes.filter((_, i) => positioned[i]), gap)
   const warm = mostPositioned && (scope === 'auto' ? valid : true)
   const stats: OrganicLayoutStats = { iterations: 0, overlapIterations: 0, scaledUp: 0, components: components.length, warmStart: warm, solvedNodes: 0 }
+  const pinned = sorted.map((nd, i) => Boolean(nd.pinned) && positioned[i])
+  // The input positions of the nodes that had them: the Procrustes reference for a re-solved
+  // sketch and the anchors for pinned nodes. Captured before any node is placed or moved.
+  const originalPos = pos.map(q => ({ ...q }))
+  const originallyPositioned = positioned.slice()
 
   // Which nodes the stress solve may move.
   const movable = new Uint8Array(n)
   if (!warm || scope === 'all') {
-    for (let i = 0; i < n; i++) movable[i] = sorted[i].pinned ? 0 : 1
+    for (let i = 0; i < n; i++) movable[i] = pinned[i] ? 0 : 1
   } else {
     const affected = new Set<number>()
     for (let i = 0; i < n; i++) if (!positioned[i]) affected.add(i)
     for (const id of options.affectedIds ?? []) { const i = index.get(id); if (i !== undefined) affected.add(i) }
     for (const i of [...affected]) for (const v of adj[i]) affected.add(v)
-    for (const i of affected) if (!sorted[i].pinned) movable[i] = 1
+    for (const i of affected) if (!pinned[i]) movable[i] = 1
   }
   stats.solvedNodes = movable.reduce((s, v) => s + v, 0)
 
   // Stages 1–3 per component (lockstep sweeps so the total stress history is monotone).
   const solvers = components
     .filter(m => m.length > 1)
-    .map(m => buildComponentSolver(m, adj, sorted, pos, movable, L, gap, warm))
+    .map(m => buildComponentSolver(m, adj, sorted, pos, movable, L, gap))
 
-  const initial = warm ? pos.map(p => ({ ...p })) : null
   if (!warm) {
-    // Cold start: MDS per component, every component centered at the origin for now.
+    // Cold start: MDS per component, then each component's frame anchored onto its pins (or
+    // centered at the origin when it has none).
     for (const s of solvers) s.initFromMds()
-    for (const m of components) if (m.length === 1) { pos[m[0]].x = 0; pos[m[0]].y = 0 }
+    for (const m of components) if (m.length === 1) pos[m[0]] = pinned[m[0]] ? { ...originalPos[m[0]] } : { x: 0, y: 0 }
+    for (const m of components) {
+      const pins = m.filter(i => pinned[i])
+      if (pins.length) { rigidAlign(pos, pins, originalPos, m); for (const i of pins) pos[i] = { ...originalPos[i] } }
+    }
   } else {
     // Warm start: place nodes that have no coordinates next to their positioned neighbors.
     for (let i = 0; i < n; i++) {
@@ -213,6 +229,7 @@ export function organicLayout(
         const bb = bbox(boxes.filter((_, j) => positioned[j]))
         pos[i] = { x: bb.cx + u.x * (bb.w / 2 + L), y: bb.cy + u.y * (bb.h / 2 + L) }
       }
+      boxes[i].x = pos[i].x; boxes[i].y = pos[i].y
       positioned[i] = true
     }
   }
@@ -222,34 +239,46 @@ export function organicLayout(
     let stress = solvers.reduce((s, c) => s + c.stress(), 0)
     stressHistory.push(stress)
     for (let it = 0; it < maxIterations; it++) {
-      for (const s of solvers) s.sweep()
+      let maxMove = 0
+      for (const s of solvers) maxMove = Math.max(maxMove, s.sweep())
       const next = solvers.reduce((s, c) => s + c.stress(), 0)
       stressHistory.push(next)
       stats.iterations = it + 1
-      if (stress - next <= tolerance * Math.max(stress, 1e-12)) break
+      // Converged when stress stops falling, in relative terms or because nothing moved by more
+      // than a hundredth of a pixel (an exactly embeddable graph drives stress to 0, where a
+      // relative test alone never fires).
+      if (stress - next <= tolerance * Math.max(stress, 1e-12) || maxMove < 0.01) break
       stress = next
     }
   } else if (solvers.length) {
     stressHistory.push(solvers.reduce((s, c) => s + c.stress(), 0))
   }
 
+  // Stage 7 — a sketch re-solved in full keeps its input's orientation: align the solved frame
+  // onto the input positions BEFORE the overlap stage, so the axis-aligned post-conditions that
+  // stage establishes are never rotated away afterwards. Pins are then restored exactly.
+  if (warm && scope === 'all') {
+    const ref = sorted.map((_, i) => i).filter(i => originallyPositioned[i])
+    rigidAlign(pos, ref, originalPos, sorted.map((_, i) => i))
+    for (let i = 0; i < n; i++) if (pinned[i]) pos[i] = { ...originalPos[i] }
+  }
+
   // Stage 5 — overlap removal, guaranteed, per component.
   syncBoxes()
   for (const m of components) {
     if (m.length < 2) continue
-    removeOverlaps(m, boxes, pos, sorted, gap, stats)
+    removeOverlaps(m, boxes, pos, sorted, pinned, gap, stats)
   }
   syncBoxes()
 
   // Stage 6 — pack components (cold only; a sketch keeps its arrangement).
-  if (!warm) packComponents(components, boxes, pos, gap, componentSpacing)
-  else if (anyTooClose(boxes, gap)) {
-    // New nodes placed into a sketch can still collide across components; one global pass.
-    removeOverlaps(components.flat(), boxes, pos, sorted, gap, stats)
+  if (!warm) packComponents(components, boxes, pos, pinned, gap, componentSpacing)
+  if (warm || components.some(m => m.some(i => pinned[i]))) {
+    syncBoxes()
+    // New nodes placed into a sketch, or components anchored by pins, can still collide across
+    // components: one global pass over everything.
+    if (anyTooClose(boxes, gap)) removeOverlaps(components.flat(), boxes, pos, sorted, pinned, gap, stats)
   }
-
-  // Stage 7 — keep a re-solved sketch oriented like its input.
-  if (warm && scope === 'all' && initial) procrustesAlign(pos, initial)
 
   const positions = new Map<string, Pt>()
   sorted.forEach((nd, i) => positions.set(nd.id, { x: pos[i].x, y: pos[i].y }))
@@ -260,7 +289,8 @@ export function organicLayout(
 
 interface ComponentSolver {
   initFromMds(): void
-  sweep(): void
+  /** One Gauss-Seidel sweep over the movable nodes; returns the largest displacement in px. */
+  sweep(): number
   stress(): number
 }
 
@@ -272,7 +302,6 @@ function buildComponentSolver(
   movable: Uint8Array,
   L: number,
   gap: number,
-  warm: boolean,
 ): ComponentSolver {
   const m = members.length
   const local = new Map<number, number>()
@@ -304,6 +333,10 @@ function buildComponentSolver(
     d[a * m + b] = f; d[b * m + a] = f
   }
   // Stage 4 — stars: leaves of one hub (>= 3 leaves) sit on a ring instead of a stress clump.
+  // Deliberate deviation from design-material's `min(L, 2L·sin(π/k))`: the ring is capped at the
+  // hop-2 ideal (2L), not L. Capping at L pulls every star's leaves inside their hop distance and
+  // raised scale-fitted stress on real/miserables (many stars) from 0.129 to 0.142, past the
+  // Stage 1 gate's 0.132; the cap only matters for k <= 6 anyway.
   for (let hub = 0; hub < m; hub++) {
     const leaves = nbrs[hub].filter(v => nbrs[v].length === 1)
     if (leaves.length < 3) continue
@@ -327,10 +360,10 @@ function buildComponentSolver(
         // would otherwise trap the localized updates on a line or a point.
         pos[members[i]] = { x: coords[2 * i] + u.x * 0.01 * L, y: coords[2 * i + 1] + u.y * 0.01 * L }
       }
-      void warm
     },
     sweep() {
       const q = p()
+      let maxMove = 0
       for (let i = 0; i < m; i++) {
         if (!movable[members[i]]) continue
         let nx = 0, ny = 0, den = 0
@@ -348,8 +381,13 @@ function buildComponentSolver(
           ny += wij * (xj.y + (dij * dy) / dist)
           den += wij
         }
-        if (den > 0) { xi.x = nx / den; xi.y = ny / den }
+        if (den > 0) {
+          const nxv = nx / den, nyv = ny / den
+          maxMove = Math.max(maxMove, Math.hypot(nxv - xi.x, nyv - xi.y))
+          xi.x = nxv; xi.y = nyv
+        }
       }
+      return maxMove
     },
     stress() {
       const q = p()
@@ -454,6 +492,17 @@ function pivotMds(d: Float64Array, m: number): Float64Array {
     for (let j = 0; j < k; j++) { x += C[i * k + j] * v1[j]; y += C[i * k + j] * v2[j] }
     out[2 * i] = x; out[2 * i + 1] = y
   }
+  // The projection C·v is in singular-value units, not distance units (classical MDS's √λ·u
+  // is). Fit one uniform scale so node-to-pivot distances match their ideals in least squares.
+  let num = 0, den = 0
+  for (let i = 0; i < m; i++) for (let j = 0; j < k; j++) {
+    const pj = pivots[j]
+    if (pj === i) continue
+    const e = Math.hypot(out[2 * i] - out[2 * pj], out[2 * i + 1] - out[2 * pj + 1])
+    num += d[i * m + pj] * e; den += e * e
+  }
+  const scale = den > 0 ? num / den : 1
+  for (let i = 0; i < 2 * m; i++) out[i] *= scale
   return out
 }
 
@@ -493,18 +542,23 @@ function proximityEdges(members: number[], boxes: Box[]): Array<[number, number]
   return out
 }
 
-function removeOverlaps(members: number[], boxes: Box[], pos: Pt[], nodes: readonly LayoutNode[], gap: number, stats: OrganicLayoutStats): void {
+function removeOverlaps(members: number[], boxes: Box[], pos: Pt[], nodes: readonly LayoutNode[], pinned: boolean[], gap: number, stats: OrganicLayoutStats): void {
   const sync = () => members.forEach(g => { boxes[g].x = pos[g].x; boxes[g].y = pos[g].y })
-  // Coincident centers have no direction to grow along: nudge them apart deterministically first.
-  for (let i = 0; i < members.length; i++) for (let j = i + 1; j < members.length; j++) {
-    const a = members[i], b = members[j]
-    if (Math.abs(pos[a].x - pos[b].x) < 1e-6 && Math.abs(pos[a].y - pos[b].y) < 1e-6) {
-      const u = unitFor(nodes[b].id)
-      pos[b].x += u.x; pos[b].y += u.y
+  // Coincident centers have no direction to grow along (growFactor would be infinite): nudge
+  // them apart deterministically. Run before every pass, since a grow pass can create new ones.
+  const separateCoincident = () => {
+    for (let i = 0; i < members.length; i++) for (let j = i + 1; j < members.length; j++) {
+      const a = members[i], b = members[j]
+      if (Math.abs(pos[a].x - pos[b].x) < 1e-6 && Math.abs(pos[a].y - pos[b].y) < 1e-6) {
+        const mover = pinned[b] && !pinned[a] ? a : b
+        const u = unitFor(nodes[mover].id)
+        pos[mover].x += u.x; pos[mover].y += u.y
+      }
     }
+    sync()
   }
-  sync()
   for (let pass = 0; pass < OVERLAP_MAX_PASSES; pass++) {
+    separateCoincident()
     const overlapping: Array<[number, number]> = []
     for (let i = 0; i < members.length; i++) for (let j = i + 1; j < members.length; j++) {
       if (tooClose(boxes[members[i]], boxes[members[j]], gap)) overlapping.push([members[i], members[j]])
@@ -529,12 +583,15 @@ function removeOverlaps(members: number[], boxes: Box[], pos: Pt[], nodes: reado
       tree.get(e.a)!.push({ to: e.b, t: e.t })
       tree.get(e.b)!.push({ to: e.a, t: e.t })
     }
-    // Grow from the node nearest the centroid.
+    // Grow from a pinned node if there is one (the root never moves), else from the node
+    // nearest the centroid.
     let cx = 0, cy = 0
     for (const g of members) { cx += pos[g].x; cy += pos[g].y }
     cx /= members.length; cy /= members.length
     let root = members[0], best = Infinity
     for (const g of members) { const dd = Math.hypot(pos[g].x - cx, pos[g].y - cy); if (dd < best) { best = dd; root = g } }
+    const pinnedRoot = members.find(g => pinned[g])
+    if (pinnedRoot !== undefined) root = pinnedRoot
     const next = new Map<number, Pt>([[root, { ...pos[root] }]])
     const stack = [root]
     const visited = new Set([root])
@@ -551,15 +608,18 @@ function removeOverlaps(members: number[], boxes: Box[], pos: Pt[], nodes: reado
     for (const g of members) { const q = next.get(g); if (q) { pos[g].x = q.x; pos[g].y = q.y } }
     sync()
   }
-  // Fallback: uniform scale about the centroid preserves the shape exactly and must terminate.
+  // Fallback: uniform scale about the anchor (a pinned node, else the centroid) preserves the
+  // shape exactly and must terminate: every factor is finite once no two centers coincide.
   for (let pass = 0; pass < SCALE_MAX_PASSES; pass++) {
+    separateCoincident()
     let t = 1
     for (let i = 0; i < members.length; i++) for (let j = i + 1; j < members.length; j++) t = Math.max(t, growFactor(boxes[members[i]], boxes[members[j]], gap))
     if (t <= 1) return
     stats.scaledUp++
+    const anchor = members.find(g => pinned[g])
     let cx = 0, cy = 0
-    for (const g of members) { cx += pos[g].x; cy += pos[g].y }
-    cx /= members.length; cy /= members.length
+    if (anchor !== undefined) { cx = pos[anchor].x; cy = pos[anchor].y }
+    else { for (const g of members) { cx += pos[g].x; cy += pos[g].y } cx /= members.length; cy /= members.length }
     for (const g of members) { pos[g].x = cx + (pos[g].x - cx) * t; pos[g].y = cy + (pos[g].y - cy) * t }
     sync()
   }
@@ -577,47 +637,66 @@ function bbox(boxes: Box[]): { cx: number; cy: number; w: number; h: number } {
   return { cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, w: maxX - minX, h: maxY - minY }
 }
 
-function packComponents(components: number[][], boxes: Box[], pos: Pt[], gap: number, spacing: number): void {
-  if (components.length === 1) {
-    const bb = bbox(components[0].map(g => boxes[g]))
-    for (const g of components[0]) { pos[g].x -= bb.cx; pos[g].y -= bb.cy }
+function packComponents(components: number[][], boxes: Box[], pos: Pt[], pinned: boolean[], gap: number, spacing: number): void {
+  const anchored = components.filter(m => m.some(i => pinned[i]))
+  const free = components.filter(m => !m.some(i => pinned[i]))
+  if (free.length === 0) return
+  const pad = Math.max(gap, spacing)
+  if (free.length === 1 && anchored.length === 0) {
+    const bb = bbox(free[0].map(g => boxes[g]))
+    for (const g of free[0]) { pos[g].x -= bb.cx; pos[g].y -= bb.cy }
     return
   }
-  const circles = components.map((m, i) => {
+  const circles = free.map((m, i) => {
     const bb = bbox(m.map(g => boxes[g]))
-    return { i, bb, r: Math.hypot(bb.w, bb.h) / 2 + Math.max(gap, spacing) / 2, x: 0, y: 0 }
+    return { i, bb, r: Math.hypot(bb.w, bb.h) / 2 + pad / 2, x: 0, y: 0 }
   })
   circles.sort((a, b) => b.r - a.r || a.i - b.i)
   packSiblings(circles)
-  for (const c of circles) for (const g of components[c.i]) { pos[g].x += c.x - c.bb.cx; pos[g].y += c.y - c.bb.cy }
+  for (const c of circles) for (const g of free[c.i]) { pos[g].x += c.x - c.bb.cx; pos[g].y += c.y - c.bb.cy }
+  if (anchored.length === 0) return
+  // Components anchored by pins keep their absolute place; the packed group sits to their right
+  // when the two would otherwise collide.
+  const anchoredBb = bbox(anchored.flat().map(g => boxes[g]))
+  const packed = free.flat()
+  const packedBb = bbox(packed.map(g => ({ ...boxes[g], x: pos[g].x, y: pos[g].y })))
+  const overlapX = Math.abs(packedBb.cx - anchoredBb.cx) < (packedBb.w + anchoredBb.w) / 2 + pad
+  const overlapY = Math.abs(packedBb.cy - anchoredBb.cy) < (packedBb.h + anchoredBb.h) / 2 + pad
+  if (overlapX && overlapY) {
+    const dx = anchoredBb.cx + anchoredBb.w / 2 + pad + packedBb.w / 2 - packedBb.cx
+    for (const g of packed) pos[g].x += dx
+  }
 }
 
-/** Rigidly align `pos` onto `ref` (translation, rotation, reflection; no scaling). */
-function procrustesAlign(pos: Pt[], ref: Pt[]): void {
-  const n = pos.length
-  if (n < 2) return
-  const mean = (p: Pt[]) => p.reduce((s, q) => ({ x: s.x + q.x / n, y: s.y + q.y / n }), { x: 0, y: 0 })
-  const mp = mean(pos), mr = mean(ref)
+/**
+ * Rigidly align `pos` onto `ref` (translation, rotation, reflection; no scaling): the transform
+ * is fitted on `fitIdx` (least squares, 2-D orthogonal Procrustes) and applied to `applyIdx`.
+ * With one fit point this is a translation; with none, a no-op.
+ */
+function rigidAlign(pos: Pt[], fitIdx: number[], ref: Pt[], applyIdx: number[]): void {
+  const k = fitIdx.length
+  if (k === 0) return
+  const mp = { x: 0, y: 0 }, mr = { x: 0, y: 0 }
+  for (const i of fitIdx) { mp.x += pos[i].x / k; mp.y += pos[i].y / k; mr.x += ref[i].x / k; mr.y += ref[i].y / k }
   const fit = (flip: boolean) => {
     let sxx = 0, sxy = 0, syx = 0, syy = 0
-    for (let i = 0; i < n; i++) {
+    for (const i of fitIdx) {
       const px = pos[i].x - mp.x, py = (pos[i].y - mp.y) * (flip ? -1 : 1)
       const rx = ref[i].x - mr.x, ry = ref[i].y - mr.y
       sxx += px * rx; sxy += px * ry; syx += py * rx; syy += py * ry
     }
-    const theta = Math.atan2(sxy - syx, sxx + syy)
-    const c = Math.cos(theta), s = Math.sin(theta)
-    let err = 0
-    const out: Pt[] = []
-    for (let i = 0; i < n; i++) {
-      const px = pos[i].x - mp.x, py = (pos[i].y - mp.y) * (flip ? -1 : 1)
-      const q = { x: c * px - s * py + mr.x, y: s * px + c * py + mr.y }
-      out.push(q)
-      err += (q.x - ref[i].x) ** 2 + (q.y - ref[i].y) ** 2
+    const theta = k >= 2 ? Math.atan2(sxy - syx, sxx + syy) : 0
+    const c = Math.cos(theta), sn = Math.sin(theta)
+    const map = (q: Pt): Pt => {
+      const px = q.x - mp.x, py = (q.y - mp.y) * (flip ? -1 : 1)
+      return { x: c * px - sn * py + mr.x, y: sn * px + c * py + mr.y }
     }
-    return { err, out }
+    let err = 0
+    for (const i of fitIdx) { const q = map(pos[i]); err += (q.x - ref[i].x) ** 2 + (q.y - ref[i].y) ** 2 }
+    return { err, map }
   }
-  const a = fit(false), b = fit(true)
-  const bestFit = b.err < a.err ? b : a
-  for (let i = 0; i < n; i++) { pos[i].x = bestFit.out[i].x; pos[i].y = bestFit.out[i].y }
+  const a = fit(false)
+  const best = k >= 3 ? (() => { const b = fit(true); return b.err < a.err ? b : a })() : a
+  const mapped = applyIdx.map(i => best.map(pos[i]))
+  applyIdx.forEach((i, j) => { pos[i].x = mapped[j].x; pos[i].y = mapped[j].y })
 }

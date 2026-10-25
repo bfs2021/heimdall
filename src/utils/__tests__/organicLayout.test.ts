@@ -131,14 +131,106 @@ describe('organicLayout', () => {
     expect(minGap(unseeded(ids), positions)).toBeGreaterThanOrEqual(GAP)
   })
 
-  it('does not move pinned nodes in the stress solve', () => {
+  it('keeps a pinned node exactly where it was pinned on a cold start', () => {
     const ids = ['a', 'b', 'c', 'd', 'e']
     const nodes = unseeded(ids).map(n => (n.id === 'a' ? { ...n, x: 500, y: -300, pinned: true } : n))
-    const { positions } = organicLayout(nodes, chainEdges(ids), { scope: 'all' })
-    // The overlap and packing stages may translate the component; the pin holds relative to it.
-    const a = positions.get('a')!
-    expect(Number.isFinite(a.x)).toBe(true)
-    expect(positions.size).toBe(5)
+    for (const scope of ['auto', 'all'] as const) {
+      const { positions, stats } = organicLayout(nodes, chainEdges(ids), { scope })
+      expect(stats.warmStart).toBe(false)
+      expect(positions.get('a')).toEqual({ x: 500, y: -300 })
+      expect(minGap(nodes, positions)).toBeGreaterThanOrEqual(GAP)
+    }
+  })
+
+  it('anchors a component onto two pins and keeps the other components clear of it', () => {
+    const ids = ['a', 'b', 'c', 'd', 'e', 'p0', 'p1', 'p2', 'iso']
+    const nodes = unseeded(ids).map(n =>
+      n.id === 'a' ? { ...n, x: 0, y: 0, pinned: true } : n.id === 'e' ? { ...n, x: 400, y: 0, pinned: true } : n,
+    )
+    const edges = [...chainEdges(['a', 'b', 'c', 'd', 'e']), ...chainEdges(['p0', 'p1', 'p2'])]
+    const { positions } = organicLayout(nodes, edges)
+    expect(positions.get('a')).toEqual({ x: 0, y: 0 })
+    // The second pin is held unless it conflicts with the no-overlap post-condition (it does not here).
+    const e = positions.get('e')!
+    expect(Math.hypot(e.x - 400, e.y)).toBeLessThan(1e-6)
+    expect(minGap(nodes, positions)).toBeGreaterThanOrEqual(GAP)
+  })
+
+  it('re-solves a sketch in full with scope "all", including a new node, and stays finite and valid', () => {
+    const ids = ['s0', 's1', 's2', 's3', 's4', 's5', 's6', 's7']
+    const first = organicLayout(unseeded(ids), chainEdges(ids))
+    const warmNodes: LayoutNode[] = [
+      ...unseeded(ids).map(n => ({ ...n, ...first.positions.get(n.id)! })),
+      { id: 'new', x: NaN, y: NaN, width: W, height: H },
+    ]
+    const second = organicLayout(warmNodes, [...chainEdges(ids), { source: 's3', target: 'new' }], { scope: 'all', minimumNodeDistance: GAP })
+    for (const p of second.positions.values()) expect(Number.isFinite(p.x) && Number.isFinite(p.y)).toBe(true)
+    expect(minGap(warmNodes, second.positions)).toBeGreaterThanOrEqual(GAP)
+  })
+
+  it('keeps the post-conditions when a sketch is re-solved in full on its own output', () => {
+    const { nodes, edges } = communities()
+    const first = organicLayout(nodes, edges, { minimumNodeDistance: GAP })
+    const warmNodes = nodes.map(n => ({ ...n, ...first.positions.get(n.id)! }))
+    const second = organicLayout(warmNodes, edges, { scope: 'all', minimumNodeDistance: GAP })
+    expect(second.stats.warmStart).toBe(true)
+    expect(minGap(warmNodes, second.positions)).toBeGreaterThanOrEqual(GAP)
+    // Aligned onto the input, so the re-solve reads as the same picture, not a rotated one.
+    expect(maxDisplacement(first.positions, second.positions)).toBeLessThan(160)
+  })
+
+  it('places several new isolates into a sketch without producing NaN', () => {
+    const ids = ['s0', 's1', 's2', 's3', 's4', 's5', 's6', 's7']
+    const first = organicLayout(unseeded(ids), chainEdges(ids))
+    const warmNodes: LayoutNode[] = [
+      ...unseeded(ids).map(n => ({ ...n, ...first.positions.get(n.id)! })),
+      { id: 'iso1', x: NaN, y: NaN, width: W, height: H },
+      { id: 'iso2', x: NaN, y: NaN, width: W, height: H },
+    ]
+    const second = organicLayout(warmNodes, chainEdges(ids))
+    expect(second.stats.warmStart).toBe(true)
+    for (const p of second.positions.values()) expect(Number.isFinite(p.x) && Number.isFinite(p.y)).toBe(true)
+    expect(minGap(warmNodes, second.positions)).toBeGreaterThanOrEqual(GAP)
+  })
+
+  it('re-settles the nodes named in affectedIds and their neighbors on a valid sketch', () => {
+    const { nodes, edges } = communities()
+    const first = organicLayout(nodes, edges)
+    const warmNodes = nodes.map(n => ({ ...n, ...first.positions.get(n.id)! }))
+    const untouched = organicLayout(warmNodes, edges)
+    expect(untouched.stats.solvedNodes).toBe(0)
+    const nudged = organicLayout(warmNodes, edges, { affectedIds: ['b2'] })
+    expect(nudged.stats.solvedNodes).toBeGreaterThan(0)
+    expect(minGap(warmNodes, nudged.positions)).toBeGreaterThanOrEqual(GAP)
+  })
+
+  it('treats a tiny circle seed that already honors the post-conditions as a sketch (documented)', () => {
+    // n <= 4 on a radius-120 circle with 138x30 cards is overlap-free, so the rule keeps it.
+    // GraphCanvas never sends a seed (it sends NaN), so this only affects callers who seed by hand.
+    const ids = ['a', 'b', 'c']
+    const { stats } = organicLayout(circleSeed(ids), chainEdges(ids))
+    expect(stats.warmStart).toBe(true)
+    expect(stats.solvedNodes).toBe(0)
+  })
+
+  it('uses PivotMDS above 600 nodes and seeds at the ideal scale', () => {
+    const side = 27 // 729-node grid
+    const ids: string[] = []
+    const edges: LayoutEdge[] = []
+    for (let r = 0; r < side; r++) for (let c = 0; c < side; c++) {
+      const id = `g${r}_${c}`
+      ids.push(id)
+      if (c > 0) edges.push({ source: `g${r}_${c - 1}`, target: id })
+      if (r > 0) edges.push({ source: `g${r - 1}_${c}`, target: id })
+    }
+    const nodes = ids.map(id => ({ id, x: NaN, y: NaN, width: 20, height: 20 }))
+    const { positions, stressHistory, stats } = organicLayout(nodes, edges, { maxIterations: 5 })
+    expect(stats.warmStart).toBe(false)
+    let maxR = 0
+    for (const p of positions.values()) maxR = Math.max(maxR, Math.hypot(p.x, p.y))
+    // Ideal extent is about side × 160 px across; a seed in singular-value units was 1e8.
+    expect(maxR).toBeLessThan(side * 160 * 4)
+    expect(stressHistory[0]).toBeLessThan(1e9)
   })
 
   it('ignores self-loops, duplicate edges and edges to unknown nodes', () => {
