@@ -31,26 +31,34 @@ test.describe('integration: Galaxy Layout Collapse/Expand', () => {
     await removeDarkCanvasMode(page)
   })
 
-  // Helper function to check for overlapping node bounding boxes
+  // Helper: overlapping node pairs. Galaxy's default nodes are round bodies (.graph-node--body),
+  // tested as circles — their square bounding boxes can overlap at the corners while the circles
+  // don't touch. Cards are tested as boxes. Sub-pixel contact is ignored.
   // Returns { count: total nodes, overlaps: number of overlapping pairs }
   async function nodeOverlaps(page: import('@playwright/test').Page) {
     const nodes = page.locator('[data-testid^="graph-node-"]')
     const count = await nodes.count()
-    const boxes = []
+    const shapes: { x: number; y: number; width: number; height: number; round: boolean }[] = []
     for (let i = 0; i < count; i++) {
-      const box = await nodes.nth(i).boundingBox()
-      if (box) boxes.push(box)
+      const node = nodes.nth(i)
+      const box = await node.boundingBox()
+      if (box) shapes.push({ ...box, round: (await node.locator('.graph-node--body').count()) > 0 })
     }
     let overlaps = 0
-    for (let i = 0; i < boxes.length; i++) {
-      for (let j = i + 1; j < boxes.length; j++) {
-        const a = boxes[i],
-          b = boxes[j]
+    for (let i = 0; i < shapes.length; i++) {
+      for (let j = i + 1; j < shapes.length; j++) {
+        const a = shapes[i],
+          b = shapes[j]
+        if (a.round && b.round) {
+          const d = Math.hypot(a.x + a.width / 2 - (b.x + b.width / 2), a.y + a.height / 2 - (b.y + b.height / 2))
+          if ((a.width + b.width) / 2 - d > 0.5) overlaps++
+          continue
+        }
         const overlapX =
           Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x)
         const overlapY =
           Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y)
-        if (overlapX > 0 && overlapY > 0) overlaps++
+        if (overlapX > 0.5 && overlapY > 0.5) overlaps++
       }
     }
     return { count, overlaps }

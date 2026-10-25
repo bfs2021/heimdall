@@ -1742,9 +1742,19 @@ test.describe("integration: Graph Canvas Components", () => {
           box = next;
           if (stable) break;
         }
-        const startX = box.x + box.width / 2;
-        const startY = box.y + box.height / 2;
+        let startX = box.x + box.width / 2;
+        let startY = box.y + box.height / 2;
 
+        // Hovering a node can shift the page layout above the canvas (this showcase shows
+        // hover state above it, moving the canvas ~34px). Re-centre on the node after
+        // hovering, or the press lands on whatever slid into its old spot — before this,
+        // the press usually hit an edge, and the "drag" never moved the node at all.
+        await page.mouse.move(startX, startY);
+        const hovered = await node.boundingBox();
+        if (!hovered) throw new Error(`${testId} not visible`);
+        startX = hovered.x + hovered.width / 2;
+        startY = hovered.y + hovered.height / 2;
+        box = hovered;
         await page.mouse.move(startX, startY);
         await page.mouse.down();
         await page.mouse.move(startX + 2, startY);

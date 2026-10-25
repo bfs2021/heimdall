@@ -444,10 +444,19 @@ export default function GraphShowcase() {
   }, [])
 
   const graphCanvas = (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', position: 'relative' }}>
       {(hoveredNodeId || hoveredEdgeId) && (
         <div
+          // Overlaid, not inserted above the canvas: inserting it resized the canvas on every
+          // hover, GraphCanvas re-anchored the view, the node slid out from under the pointer and
+          // the banner vanished again — a hover/no-hover loop on large galaxy bodies.
           style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            zIndex: 2,
+            pointerEvents: 'none',
             padding: '8px 12px',
             background: 'var(--canvas-bg-2, #f4f5f7)',
             borderBottom: '1px solid var(--canvas-border, #d8dde5)',
@@ -608,10 +617,19 @@ export default function GraphShowcase() {
   )
 
   const galaxyCanvas = (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', position: 'relative' }}>
       {(hoveredNodeId || hoveredEdgeId) && (
         <div
+          // Overlaid, not inserted above the canvas: inserting it resized the canvas on every
+          // hover, GraphCanvas re-anchored the view, the node slid out from under the pointer and
+          // the banner vanished again — a hover/no-hover loop on large galaxy bodies.
           style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            zIndex: 2,
+            pointerEvents: 'none',
             padding: '8px 12px',
             background: 'var(--canvas-bg-2, #f4f5f7)',
             borderBottom: '1px solid var(--canvas-border, #d8dde5)',
@@ -663,10 +681,19 @@ export default function GraphShowcase() {
   )
 
   const clusteredCanvas = (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', position: 'relative' }}>
       {(hoveredNodeId || hoveredEdgeId) && (
         <div
+          // Overlaid, not inserted above the canvas: inserting it resized the canvas on every
+          // hover, GraphCanvas re-anchored the view, the node slid out from under the pointer and
+          // the banner vanished again — a hover/no-hover loop on large galaxy bodies.
           style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            zIndex: 2,
+            pointerEvents: 'none',
             padding: '8px 12px',
             background: 'var(--canvas-bg-2, #f4f5f7)',
             borderBottom: '1px solid var(--canvas-border, #d8dde5)',
@@ -700,10 +727,19 @@ export default function GraphShowcase() {
   )
 
   const clickTooltipCanvas = (
-    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column', position: 'relative' }}>
       {(hoveredNodeId || hoveredEdgeId) && (
         <div
+          // Overlaid, not inserted above the canvas: inserting it resized the canvas on every
+          // hover, GraphCanvas re-anchored the view, the node slid out from under the pointer and
+          // the banner vanished again — a hover/no-hover loop on large galaxy bodies.
           style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            zIndex: 2,
+            pointerEvents: 'none',
             padding: '8px 12px',
             background: 'var(--canvas-bg-2, #f4f5f7)',
             borderBottom: '1px solid var(--canvas-border, #d8dde5)',

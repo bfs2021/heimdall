@@ -153,6 +153,17 @@ export function anchoredEdgePoint(cx: number, cy: number, w: number, h: number, 
   }
 }
 
+function endpointFor(rect: EdgeEndpointRect, anchor: EdgeAnchor, tx: number, ty: number): Point {
+  if (anchor === 'auto' && rect.radius !== undefined && rect.radius > 0) {
+    const dx = tx - rect.x
+    const dy = ty - rect.y
+    const d = Math.hypot(dx, dy)
+    if (d === 0) return { x: rect.x, y: rect.y }
+    return { x: rect.x + (dx / d) * rect.radius, y: rect.y + (dy / d) * rect.radius }
+  }
+  return anchoredEdgePoint(rect.x, rect.y, rect.width, rect.height, anchor, tx, ty)
+}
+
 export const DEFAULT_CUBIC_CURVATURE = 0.22
 
 /**
@@ -210,6 +221,10 @@ export interface EdgeEndpointRect {
   y: number
   width: number
   height: number
+  /** Set for a round body (galaxy's default node): an 'auto' endpoint sits on the circle, not on
+   *  the bounding box — box corners stick out past the circle, so two close round bodies left a
+   *  diagonal edge almost no visible line. */
+  radius?: number
 }
 
 export interface EdgePathOptions {
@@ -226,8 +241,8 @@ export function computeEdgePath(source: EdgeEndpointRect, target: EdgeEndpointRe
   const sourceAnchor = options.sourceAnchor ?? 'auto'
   const targetAnchor = options.targetAnchor ?? 'auto'
 
-  const sp = anchoredEdgePoint(source.x, source.y, source.width, source.height, sourceAnchor, target.x, target.y)
-  const tp = anchoredEdgePoint(target.x, target.y, target.width, target.height, targetAnchor, source.x, source.y)
+  const sp = endpointFor(source, sourceAnchor, target.x, target.y)
+  const tp = endpointFor(target, targetAnchor, source.x, source.y)
 
   if (sourceAnchor === 'auto' && targetAnchor === 'auto') {
     return bezierPath(sp, tp, options.curvature ?? DEFAULT_QUADRATIC_CURVATURE)

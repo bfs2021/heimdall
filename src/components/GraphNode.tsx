@@ -23,7 +23,20 @@ export interface GraphNodeProps extends BaseGraphNodeComponentProps, Omit<React.
   onFocus?: (e: React.FocusEvent<HTMLDivElement>) => void
   /** Called when the node loses focus. */
   onBlur?: (e: React.FocusEvent<HTMLDivElement>) => void
+  /**
+   * Renders the node as a round body of this radius (px) instead of a card — GraphCanvas's
+   * default for layout="galaxy", where body area encodes the node's weight. The label sits
+   * inside the body and is visually hidden (still announced, and shown on hover via `title`)
+   * when the body is too small to hold it. Selection, keyboard, popover and collapse behave
+   * exactly as on a card.
+   */
+  bodyRadius?: number
 }
+
+/** Bodies narrower than this (px) don't show their label inline (vision item 9: a body too small
+ *  for a legible label shows none at full view; hover/selection still name it). 28px gave labels
+ *  cut to fragments like "Gra ph…". */
+const MIN_LABELED_BODY_DIAMETER = 44
 
 export const GraphNode = React.forwardRef<HTMLDivElement, GraphNodeProps>(
   (
@@ -46,11 +59,20 @@ export const GraphNode = React.forwardRef<HTMLDivElement, GraphNodeProps>(
       onBlur,
       className = '',
       style: _style,
+      bodyRadius,
       ...props
     },
     ref
   ) => {
-    const classNames = ['graph-node', selected && 'selected', className]
+    const isBody = bodyRadius !== undefined && Number.isFinite(bodyRadius) && bodyRadius > 0
+    const diameter = isBody ? 2 * bodyRadius : undefined
+    const classNames = [
+      'graph-node',
+      isBody && 'graph-node--body',
+      isBody && diameter! < MIN_LABELED_BODY_DIAMETER && 'graph-node--body-unlabeled',
+      selected && 'selected',
+      className,
+    ]
       .filter(Boolean)
       .join(' ')
 
@@ -87,6 +109,7 @@ export const GraphNode = React.forwardRef<HTMLDivElement, GraphNodeProps>(
         {...(onPopoverOpen && { 'aria-expanded': popoverOpen })}
         {...(onPopoverOpen && popoverPanelId && { 'aria-controls': popoverPanelId })}
         {...(tooltipId && { 'aria-describedby': tooltipId })}
+        {...(isBody && { style: { width: diameter, height: diameter }, title: label })}
         {...props}
       >
         <span className="graph-node__swatch" />

@@ -14,8 +14,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to. On the college-football benchmark (115 nodes, 613 edges) node overlaps go from 53 to 0
   and overlapping cluster bubbles from 93% to 2%; layout is also 2-10x faster.
 
+### Changed
+
+- **`GraphCanvas`** — `layout="galaxy"` rewritten to follow the original galaxy charts it was
+  built to recreate (Risacher's D3 galaxy chart, Galaxies of the Guardian):
+  - Without a `renderNode`, nodes are drawn as round bodies whose **area grows with weight**
+    (with the square root of weight, so items spanning several orders of magnitude stay
+    distinguishable), coloured by `domainColor`, instead of label cards. Labels sit inside bodies
+    big enough to hold them, wrapping between words; smaller bodies are named on hover. When no
+    node has a `weight`, sizes come from subtree leaf counts with a higher floor. Selection,
+    keyboard, popover and collapse behave exactly as before.
+  - Each parent's children orbit it **heaviest first** in a full, evenly spaced circle. Each
+    satellite sits just far enough out for its whole subtree to clear its parent and stay within
+    its own slot, so **no two bodies overlap anywhere**, by construction rather than by a settle
+    loop. Only children curl like a galaxy arm instead of running off in a line.
+  - Independent trees are separate galaxies packed together compactly; lone nodes are packed as
+    their own group; a wide container spreads whole galaxies, never a galaxy's own orbits.
+  - Boundary discs are **off by default for galaxy** (`showClusterBoundaries` still turns them
+    on; they are now the smallest circle around each system). Structural (orbit) edge labels show
+    only when the edge or one of its nodes is hovered or selected. Edges meet round bodies at the
+    circle rather than the bounding box.
+  - Live simulation eases toward the same construction; a dragged node carries its subtree and a
+    held drag settles. Static layout is ~1-30 ms for typical graphs (was ~300 ms for 250 nodes).
+  - Options: `startAngle` now defaults to π (first satellite at 9 o'clock; was −π/2).
+    `nodeSpread` is now the default gap as a multiple of the median body radius (default 0.6;
+    was an orbit-distance multiplier, default 3.2). `nodeMargin` replaces that gap when given (0
+    means touching). `settleCycles`, `separateGroups`, `resolvedAspectScale` and
+    `resolveAspectRatioScale` are deprecated and have no effect.
+
 ### Added
 
+- **`GraphNodeData.weight`** — optional size weight for `layout="galaxy"` (ignored by every other
+  layout; unrelated to `GraphEdge.weight`). A node without one weighs the sum of its structural
+  children; when no node has a weight, each node weighs its subtree leaf count. Weights are
+  resolved over the full tree, so collapsing a subtree never resizes its parent.
+- **`GraphNode`** — `bodyRadius` prop: renders the node as a round body of that radius.
+- **`galaxyLayout`** — `GalaxyLayoutNode.weight` (orbit order) and `.radius` (true radius for a
+  round body, used instead of the box half-diagonal).
 - **`ChatComposer`** — `enterBehavior` prop (`'send' | 'newline'`, default `'send'`): controls Enter key behavior in the message textarea. When set to `'send'`, bare Enter submits the message and Shift+Enter inserts a newline (default behavior). When set to `'newline'`, bare Enter inserts a newline and Shift+Enter also inserts a newline — Submit only via the Send button. Enables touch-friendly and mobile-optimized input modes without forking or DOM-patching the component. The shortcut hint text automatically hides desktop-specific wording when `enterBehavior='newline'`.
 
 ## [0.8.0]

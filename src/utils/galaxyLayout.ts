@@ -1,26 +1,154 @@
-import { separationPass, FINAL_CLEANUP_MAX_PASSES, boundingCirclesByGroup, type LayoutNode } from './graphLayout'
-import { buildStructuralForest, galaxyGroupMap, type HierarchyEdge } from './graphHierarchy'
+import { packEnclose, packSiblings } from 'd3-hierarchy'
+import { separationPass, FINAL_CLEANUP_MAX_PASSES, type LayoutNode } from './graphLayout'
+import { buildStructuralForest, type HierarchyEdge } from './graphHierarchy'
+
+/*
+ * Galaxy layout — a weighted hierarchy drawn as nested orbital systems, after the original galaxy
+ * charts (Risacher's D3 galaxy chart; Galaxies of the Guardian): body area encodes weight, each
+ * parent's satellites orbit it in a full circle, heaviest first, and independent trees are separate
+ * galaxies.
+ *
+ * Construction (rewritten 2026-10-25; the previous version placed each satellite by its own body
+ * size alone, then spent ~300 lines of settle loops, group shifts and an aspect-ratio warp
+ * compensating for the collisions that caused):
+ *
+ *   1. Bottom-up, every node gets a SYSTEM radius: a leaf's is its body radius; a parent's is the
+ *      farthest extent of its satellites' systems around it.
+ *   2. Top-down, a parent's k satellites take k equal angular slots (heaviest at the parent's
+ *      outward heading). Each sits at the smallest distance where its whole system fits inside its
+ *      own slot's wedge and clears the parent's body:
+ *        d = max(r(parent) + gap + R(sat),  (R(sat) + gap/2) / sin(π/k))
+ *      Adjacent wedges are disjoint and every system lies inside its wedge, so no two systems
+ *      anywhere in the tree overlap — by construction, with no relaxation pass.
+ *   3. Independent trees (galaxies, including one-node orphans) are packed together by their
+ *      system circles, heaviest first (d3 packSiblings), so a forest reads as one compact sky.
+ *
+ * Pinned nodes keep their given position and carry their subtree with them; only then can bodies
+ * collide, so a separation pass runs as a safety net.
+ */
 
 export interface GalaxyLayoutNode {
   id: string
   width: number
   height: number
-  /** Explicit position pins the node in place — same convention as forceLayout. When the pinned
-   *  node has structural children, its own position also anchors where THEIR home positions are
-   *  computed relative to (see galaxySimulationStep) — dragging/pinning a "sun" cascades to its
-   *  whole subtree, not just to that one node. */
+  /** Explicit position pins the node in place — same convention as forceLayout. A pinned node's
+   *  structural subtree is laid out around the pinned position, so dragging/pinning a "sun"
+   *  carries its whole system with it. */
   x?: number
   y?: number
   pinned?: boolean
+  /** Size weight (galaxy's primary encoding — area ∝ weight). Children orbit their parent
+   *  heaviest-first. Optional: see galaxyEffectiveWeights for how a missing weight resolves. */
+  weight?: number
+  /** True body radius for a round body. When set, it replaces the box half-diagonal as this node's
+   *  radius (a circle's half-diagonal overstates it by √2). */
+  radius?: number
+}
+
+/** A node's radius for orbit placement: its explicit `radius` (round bodies), otherwise the
+ *  half-diagonal of its box (cards). */
+export function galaxyRadiusOf(n: Pick<GalaxyLayoutNode, 'width' | 'height' | 'radius'>): number {
+  return n.radius !== undefined && Number.isFinite(n.radius) && n.radius > 0 ? n.radius : Math.hypot(n.width, n.height) / 2
 }
 
 /**
- * Same shape as `HierarchyEdge` (source = parent, target = child for a structural edge) — declared
- * as an explicit extension, not a coincidentally-identical redeclaration, since `galaxyLayout.ts`
- * already builds its hierarchy via `buildStructuralForest`, which is typed against `HierarchyEdge`
- * directly. Kept as its own named type (rather than just re-exporting `HierarchyEdge`) for the
- * galaxy-specific doc note below and because it's the name galaxy layout's own public API already
- * shipped under.
+ * Effective size weight per node (design-material/galaxy/vision-statement.md, "Weight"): a node's
+ * own weight when it has one (finite, >= 0); otherwise the sum of its structural children's. If no
+ * node has a weight at all, every leaf weighs 1, so each node weighs its subtree leaf count.
+ * `childrenOf` should be the FULL forest (not just currently visible nodes), so collapsing a
+ * subtree doesn't change its parent's weight.
+ */
+export function galaxyEffectiveWeights(
+  ids: readonly string[],
+  childrenOf: ReadonlyMap<string, readonly string[]>,
+  givenWeight: (id: string) => number | undefined
+): Map<string, number> {
+  const given = new Map<string, number>()
+  for (const id of ids) {
+    const w = givenWeight(id)
+    if (w !== undefined && Number.isFinite(w) && w >= 0) given.set(id, w)
+  }
+  const anyGiven = given.size > 0
+  const weightOf = new Map<string, number>()
+  // Iterative post-order (children before parents): a 3000-node chain overflowed the call stack
+  // when this recursed. The visited set also guards cycles.
+  for (const id of postOrder(ids, childrenOf)) {
+    const own = given.get(id)
+    const kids = childrenOf.get(id) ?? []
+    weightOf.set(id, own !== undefined ? own : kids.length ? kids.reduce((sum, k) => sum + (weightOf.get(k) ?? 0), 0) : anyGiven ? 0 : 1)
+  }
+  return weightOf
+}
+
+/** Nodes in pre-order from `starts` (each with its depth), without recursion; nodes already seen
+ *  are skipped, so cycles terminate. */
+function preOrder(starts: readonly string[], childrenOf: ReadonlyMap<string, readonly string[]>): { id: string; depth: number; hasParent: boolean }[] {
+  const out: { id: string; depth: number; hasParent: boolean }[] = []
+  const seen = new Set<string>()
+  for (const start of starts) {
+    if (seen.has(start)) continue
+    const stack = [{ id: start, depth: 0, hasParent: false }]
+    while (stack.length) {
+      const item = stack.pop()!
+      if (seen.has(item.id)) continue
+      seen.add(item.id)
+      out.push(item)
+      const kids = childrenOf.get(item.id) ?? []
+      for (let i = kids.length - 1; i >= 0; i--) stack.push({ id: kids[i], depth: item.depth + 1, hasParent: true })
+    }
+  }
+  return out
+}
+
+/** Every node once, children before their parents (no recursion). */
+function postOrder(ids: readonly string[], childrenOf: ReadonlyMap<string, readonly string[]>): string[] {
+  return preOrder(ids, childrenOf).map(x => x.id).reverse()
+}
+
+/** Smallest and largest round-body radius (px) galaxy draws when it sizes bodies by weight. */
+export const GALAXY_BODY_MIN_RADIUS = 8
+export const GALAXY_BODY_MAX_RADIUS = 64
+/** Floor used when sizes come from leaf counts (no node has a weight): leaves stay big enough to
+ *  carry a label, since "small" carries no data meaning there. */
+export const GALAXY_UNWEIGHTED_MIN_RADIUS = 15
+
+/**
+ * Body radius per node from effective weights. Body AREA grows with the square root of weight,
+ * rescaled into [MIN², MAX²] across all the given nodes: area still rises strictly with weight, but
+ * a 3-4 orders-of-magnitude range (flare: 264 to 956,129) no longer flattens every small item onto
+ * the floor — with area ∝ weight, all of flare's leaves were identical dots (Austin, 2026-10-25:
+ * compress the scale). A floor keeps the smallest items visible. All-equal weights (including a
+ * single node) get the middle area.
+ */
+export function galaxyBodyRadii(
+  weightOf: ReadonlyMap<string, number>,
+  { minRadius = GALAXY_BODY_MIN_RADIUS, maxRadius = GALAXY_BODY_MAX_RADIUS }: { minRadius?: number; maxRadius?: number } = {}
+): Map<string, number> {
+  const scaled = new Map([...weightOf].map(([id, w]) => [id, Math.sqrt(Math.max(0, w))]))
+  const ws = [...scaled.values()]
+  const lo = Math.min(...ws)
+  const hi = Math.max(...ws)
+  const minA = minRadius ** 2
+  const maxA = maxRadius ** 2
+  const radii = new Map<string, number>()
+  for (const [id, w] of scaled) {
+    const t = hi > lo ? (w - lo) / (hi - lo) : 0.5
+    radii.set(id, Math.sqrt(minA + t * (maxA - minA)))
+  }
+  return radii
+}
+
+/** Heaviest first; ties keep their original (data) order. Returns a new array. */
+function heaviestFirst(ids: readonly string[], weightOf: ReadonlyMap<string, number>): string[] {
+  return ids
+    .map((id, i) => ({ id, i, w: weightOf.get(id) ?? 0 }))
+    .sort((a, b) => b.w - a.w || a.i - b.i)
+    .map(x => x.id)
+}
+
+/**
+ * Same shape as `HierarchyEdge` (source = parent, target = child for a structural edge) — kept as
+ * its own named type because it's the name galaxy layout's public API already shipped under.
  */
 export interface GalaxyLayoutEdge extends HierarchyEdge {
   /** Structural edges define the orbital hierarchy (source = parent, target = child).
@@ -29,322 +157,437 @@ export interface GalaxyLayoutEdge extends HierarchyEdge {
 }
 
 export interface GalaxyLayoutOptions {
-  /** Multiplies a child's own radius to size its orbital distance from its parent. Default 3.2 —
-   *  wide enough that an edge's label (rendered at the midpoint) clears both endpoint nodes,
-   *  and that independent orbits (siblings, other roots) don't crowd each other. */
+  /** Default gap between a satellite's system and its parent's body, and between neighbouring
+   *  systems, as a multiple of the median body radius (at least 12 px). Default 0.6. Before
+   *  2026-10-25 this multiplied a child's own radius to set its orbit distance (default 3.2);
+   *  distance now comes from the satellite's system size. */
   nodeSpread?: number
-  /** Radians. Where the outermost ring of root orbits starts. Default -PI/2 (12 o'clock). */
+  /** Radians. Heading of the first (heaviest) satellite around each galaxy's root. Default π
+   *  (9 o'clock, as in Risacher's chart: wide screens get a landscape-leaning layout). */
   startAngle?: number
-  /** How many settle cycles alternate collision separation with a pull back toward the
-   *  orbital home position. Default 24. */
+  /** @deprecated Ignored since 2026-10-25 (the construction needs no settle loop). Kept for API
+   *  compatibility. */
   settleCycles?: number
-  /** 0-1. Fraction of the remaining distance to home closed per settle cycle. Default 0.18. */
+  /** 0-1. Live simulation only: fraction of the remaining distance to home closed per tick.
+   *  Default 0.18. */
   homeStrength?: number
-  /**
-   * Extra breathing room kept clear around each node during the settle cycles, on top of what's
-   * needed to just avoid overlap — same idea as forceLayout's nodeMargin, and for the same
-   * reason: settleCycles' separation passes (see separationPass) only resolve literal overlap, so
-   * without this, a handful of sibling/cross-orbit pairs can converge to touching or a few px of
-   * gap even though most of the layout is well spread — verified on a 57-node/4-level hierarchy
-   * with real-world size variance (galaxyBudgetData in the repo's test pages), where the tightest
-   * pairs landed under 1px apart. Defaults to 0 (unpadded, today's existing behavior) rather than
-   * forceLayout's own width default — galaxyLayout's nodeSpread-based initial placement already
-   * gives most of the layout generous spacing, so defaulting this on would shift node positions
-   * (and every committed galaxy-layout snapshot) for a cosmetic fix to a narrow edge case; opt in
-   * with a modest value instead. The final cleanup pass (FINAL_CLEANUP_MAX_PASSES) always runs
-   * unpadded regardless of this value — it exists purely to guarantee zero literal overlap, and
-   * padding it too would fight homeStrength forever on a dense orbit instead of converging.
-   */
+  /** Gap (px) between systems and bodies; when set, it REPLACES the default gap (nodeSpread ×
+   *  median body radius, at least 12 px), so 0 means they touch. Also pads the overlap resolution
+   *  used when nodes are pinned. */
   nodeMargin?: number
-  /**
-   * Keeps top-level group boundary circles (see boundingCirclesByGroup, galaxyGroupHeads) from
-   * overlapping each other — the same sizing logic showClusterBoundaries renders with, computed
-   * and separated here regardless of whether boundaries are actually shown anywhere. Individual
-   * NODE overlap is already prevented unconditionally by separationPass; this is specifically
-   * about whole GROUP regions (a category's full subtree, say) crowding into a neighboring
-   * group's territory even when no two individual nodes technically overlap. Default true — a
-   * correctness fix, not a style choice, so it ships on by default unlike nodeMargin above.
-   *
-   * Also read by galaxySimulationStep, which group-separates its own per-tick home positions (not
-   * just galaxyLayout's final settled ones) — without that, a live tick's homeStrength nudge would
-   * keep pulling every unpinned node straight back toward its raw, un-separated home, undoing this
-   * option's whole effect within the first few animation frames of live mode regardless of what it
-   * accomplished in the one-shot layout that seeded it.
-   */
+  /** @deprecated Ignored since 2026-10-25: independent galaxies are always packed so they can't
+   *  overlap, and systems inside a galaxy are disjoint by construction. Kept for API compatibility. */
   separateGroups?: boolean
-  /**
-   * Container width/height (px), i.e. containerWidth / containerHeight. When provided, warps every
-   * orbital ring from a circle into an ellipse so the layout's overall shape leans toward the
-   * container's own proportions, instead of always producing a footprint that a wide-short or
-   * tall-narrow container then has to letterbox. Omitted (or exactly 1) reproduces today's exact
-   * un-warped placement bit-for-bit — every `distance` still comes from the same nodeSpread-based
-   * radius math; only the polar-to-cartesian conversion changes, so nodeMargin, separationPass, and
-   * shiftGroupsApart all keep working unmodified against the resulting elliptically-placed
-   * positions (they only ever read real x/y + width/height, with no notion of how a position was
-   * derived).
-   *
-   * The correction is computed *relative to this tree's own natural (unwarped) shape*, not
-   * relative to a hypothetical circle — see galaxySimulationStep's own docs for why a naive
-   * "warp a circle toward the target ratio" formula badly misjudges how much correction is
-   * actually needed: a tree with a long single-child chain, in particular, can be dramatically
-   * non-circular on its own, in either direction, before this option is even involved, and
-   * measuring the wrong starting point can make a mismatch *worse* instead of better. Both the
-   * target ratio and the resulting correction factor are clamped to [1/8, 8] (guards a transient
-   * 0-height container measurement from producing an Infinity correction — a NaN ratio, e.g. from
-   * an unmeasured 0/0 element, is caught earlier by an explicit Number.isFinite check, since
-   * Math.max would just propagate NaN straight through the clamp — and keeps an extreme correction
-   * — a naturally very tall tree targeting a very wide container, say — from spiraling).
-   *
-   * That clamped correction is then *not* applied directly — see `resolveAspectRatioScale` for the
-   * full mechanism, but in short: a fixed damping formula (this option's earlier implementation
-   * used a flat fourth root) measurably under-corrected some real trees while over-inflating
-   * others, so a single constant can't serve both. Instead, `resolveAspectRatioScale` binary-
-   * searches how much of the correction is safe to apply, bounded by how much the *actual settled*
-   * rendered area is allowed to grow (roughly double the natural, unwarped area) — not a blind
-   * formula. The reason scaleX * scaleY === 1 doesn't keep the *displayed* area constant the way
-   * it looks like it should: `separationPass`'s collision floor pushes back against *compression*
-   * (a squeezed axis gets fought back up toward its natural size) but does nothing to resist
-   * *expansion* (a stretched axis applies in full) — so an uncapped correction on a tree whose
-   * natural shape is already far from the target doesn't trade width for height, it just adds
-   * width. Even the strongest correction the search allows still has a practical ceiling
-   * regardless of this option's own math: `separationPass` refuses to compress adjacent nodes past
-   * their own rendered size, so a long chain that genuinely needs N node-heights of room in one
-   * direction can't be squeezed below that no matter how aggressively this option asks it to. Not
-   * applied to shiftGroupsApart's own group-vs-group macro pass — that still treats group boundary
-   * circles as literally circular when pushing them apart from each other, a known, deliberately
-   * out-of-scope limitation (multi-group top-level arrangement won't lean into the aspect ratio
-   * quite as strongly as a single tree's internal orbits do).
-   */
+  /** Container width/height. Leans a forest's arrangement of whole galaxies toward this shape
+   *  (arrangeToAspect). Never warps orbits inside a galaxy (vision item 5). */
   aspectRatio?: number
-  /**
-   * Pre-resolved output of `resolveAspectRatioScale` — when provided, `aspectRatio` is ignored and
-   * this exact {x, y} elliptical scale is used directly, skipping the natural-shape measurement
-   * and binary search that resolving it from scratch requires. `galaxyLayout` always resolves it
-   * itself, once, before its settle loop (rather than paying that cost on every one of its 24
-   * cycles). A live-simulation caller driving `galaxySimulationStep` directly once per animation
-   * frame should do the same — resolve it once (e.g. in a `useMemo` keyed on the graph's
-   * structure and the target ratio, deliberately NOT on live drag positions — see
-   * resolveAspectRatioScale's own docs for why re-resolving on every frame is both too slow and
-   * not actually desirable) and pass the resolved value in here every tick instead of a raw
-   * `aspectRatio`, which — unresolved — would otherwise re-run that search on every single frame.
-   */
+  /** @deprecated Ignored since 2026-10-25 (orbits are never warped; see `aspectRatio`). Kept for
+   *  API compatibility. */
   resolvedAspectScale?: { x: number; y: number }
 }
 
-/**
- * Builds a `computeHome(ellipseX, ellipseY)` closure for a fixed tree shape (nodeMap, childrenOf,
- * roots) and settle-independent options (radiusOf, nodeSpread, startAngle) — the recursive "spread
- * children around a full circle, seeded from a virtual hub" placement described in
- * galaxySimulationStep's own docs, with the elliptical scale left as a parameter so both
- * `galaxySimulationStep` (a single call at the resolved scale) and `resolveAspectRatioScale` (many
- * calls at different trial scales during its search) can reuse the same tree/subtreeReach setup
- * instead of rebuilding it per call.
- */
-function buildComputeHome(
-  nodeMap: ReadonlyMap<string, GalaxyLayoutNode>,
-  childrenOf: ReadonlyMap<string, string[]>,
-  roots: readonly string[],
-  radiusOf: (n: GalaxyLayoutNode) => number,
-  nodeSpread: number,
-  startAngle: number
-): (ellipseX: number, ellipseY: number) => Map<string, { x: number; y: number }> {
-  // How far a node's own subtree extends beyond the node's own position — 0 for a leaf (nothing
-  // to account for), otherwise the largest child orbital distance plus that child's own reach.
-  // Root-ring seeding (below) uses this so a root with a large subtree gets pushed proportionally
-  // further from the shared hub, instead of every root — a lone orphan and the root of a 9-node,
-  // 4-level chain alike — starting at essentially the same tiny distance (just its own radius).
-  // Independent of ellipseX/ellipseY (a pure scalar distance), so computed once here and reused by
-  // every call to the returned computeHome, regardless of what scale it's called at.
-  const subtreeReach = (id: string): number => {
-    const kids = childrenOf.get(id) ?? []
-    if (kids.length === 0) return 0
-    const r = radiusOf(nodeMap.get(id)!)
-    let maxReach = 0
-    for (const childId of kids) {
-      const childR = radiusOf(nodeMap.get(childId)!)
-      const distance = r + childR * nodeSpread
-      maxReach = Math.max(maxReach, distance + subtreeReach(childId))
-    }
-    return maxReach
-  }
+/** Forests with more galaxies than this skip arrangeToAspect (quadratic). */
+const ARRANGE_MAX_GALAXIES = 150
 
-  return (ellipseX: number, ellipseY: number): Map<string, { x: number; y: number }> => {
-    const result = new Map<string, { x: number; y: number }>()
-    const offset = (distance: number, angle: number): { x: number; y: number } => ({
-      x: distance * ellipseX * Math.cos(angle),
-      y: distance * ellipseY * Math.sin(angle),
-    })
-    const place = (id: string, cx: number, cy: number, angle: number, depth: number): void => {
-      const node = nodeMap.get(id)!
-      // A pinned node's actual position overrides the (cx, cy) it was handed — both as its own
-      // home, and as the center its children are placed around, so the whole subtree follows.
-      const anchored = node.pinned && node.x !== undefined && node.y !== undefined
-      const ax = anchored ? node.x! : cx
-      const ay = anchored ? node.y! : cy
-      result.set(id, { x: ax, y: ay })
-      const kids = childrenOf.get(id) ?? []
-      const n = kids.length
-      if (n === 0) return
-      const r = radiusOf(node)
-      kids.forEach((childId, i) => {
-        const childR = radiusOf(nodeMap.get(childId)!)
-        const distance = r + childR * nodeSpread
-        // Even sibling counts below the root ring get a half-slot rotation so a child never lands
-        // directly opposite its own parent-facing edge into the grandparent.
-        const parity = n % 2 === 0 && depth > 0 ? Math.PI / n : 0
-        const childAngle = angle + (2 * Math.PI * i) / n + parity
-        const off = offset(distance, childAngle)
-        place(childId, ax + off.x, ay + off.y, childAngle, depth + 1)
-      })
-    }
+/** Smallest default gap (px) between bodies/systems; see buildForest. */
+const MIN_GAP = 12
 
-    // A virtual radius-0 hub at the origin seeds the root ring: every real root — including
-    // orphans, which are just one-node trees — becomes one of its "children", so independent
-    // trees spread around a shared center instead of all stacking at (0, 0).
-    const n = roots.length
-    roots.forEach((rootId, i) => {
-      const rootR = radiusOf(nodeMap.get(rootId)!)
-      // Own-radius term unchanged from before (so a childless root — an orphan, or any leaf-only
-      // tree — seeds at exactly the same distance it always has); the added subtreeReach term is
-      // what actually fixes a root WITH descendants landing right next to (or visually inside)
-      // an unrelated neighbor's territory — see subtreeReach's own docs above.
-      const distance = rootR * nodeSpread + subtreeReach(rootId)
-      const angle = startAngle + (2 * Math.PI * i) / n
-      const off = offset(distance, angle)
-      place(rootId, off.x, off.y, angle, 0)
-    })
-
-    return result
-  }
+interface Forest {
+  childrenOf: Map<string, string[]>
+  roots: string[]
+  weightOf: Map<string, number>
+  radiusOf: (id: string) => number
+  gap: number
 }
 
-// Weighted bounding box of a settled position map — a plain center-point bbox undercounts by up
-// to one node radius on every edge, so every caller that needs a real footprint measurement
-// (resolveAspectRatioScale's search, most notably) uses this instead.
-function weightedBboxOf(
-  positions: ReadonlyMap<string, { x: number; y: number }>,
-  nodeMap: ReadonlyMap<string, GalaxyLayoutNode>,
-  radiusOf: (n: GalaxyLayoutNode) => number
-): { width: number; height: number; ratio: number; area: number } {
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
-  for (const [id, p] of positions) {
-    const r = radiusOf(nodeMap.get(id)!)
-    minX = Math.min(minX, p.x - r); maxX = Math.max(maxX, p.x + r)
-    minY = Math.min(minY, p.y - r); maxY = Math.max(maxY, p.y + r)
+function buildForest(nodes: readonly GalaxyLayoutNode[], edges: readonly GalaxyLayoutEdge[], options: GalaxyLayoutOptions): Forest {
+  const nodeMap = new Map(nodes.map(n => [n.id, n]))
+  const { childrenOf, roots } = buildStructuralForest(nodes.map(n => n.id), edges)
+  // A caller that knows the full hierarchy (GraphCanvas) passes each node's already-effective
+  // weight; resolving again here is then a no-op. A direct caller with no weights gets leaf counts.
+  const weightOf = galaxyEffectiveWeights(nodes.map(n => n.id), childrenOf, id => nodeMap.get(id)?.weight)
+  const radiusOf = (id: string): number => {
+    const n = nodeMap.get(id)
+    return n ? galaxyRadiusOf(n) : 20
   }
-  const width = maxX - minX || 1
-  const height = maxY - minY || 1
-  return { width, height, ratio: width / height, area: width * height }
+  const radii = nodes.map(n => galaxyRadiusOf(n)).sort((a, b) => a - b)
+  const medianR = radii.length ? radii[radii.length >> 1] : 20
+  // At least MIN_GAP, so an edge between two neighbouring bodies stays visible.
+  const gap = options.nodeMargin ?? Math.max(MIN_GAP, (options.nodeSpread ?? 0.6) * medianR)
+  return { childrenOf: childrenOf as Map<string, string[]>, roots: [...roots], weightOf, radiusOf, gap }
 }
 
 /**
- * Resolves `options.aspectRatio` (a raw container ratio) into the actual {x, y} elliptical scale
- * `galaxySimulationStep`'s home computation should use — the natural-shape measurement plus
- * binary search described in `GalaxyLayoutOptions.aspectRatio`'s own docs, pulled out into its own
- * function so it can be resolved *once* and reused, rather than re-run on every settle cycle or
- * every live-simulation animation frame (each resolution costs 7 trial evaluations — one natural-
- * shape baseline plus 6 binary-search steps — each of which runs a full group-separation pass:
- * cheap once, but 24x (a settle loop) or 60x/sec (a live tick) too expensive to repeat with the
- * exact same answer every time).
- *
- * `galaxyLayout` always calls this once before its settle loop and threads the result through
- * `resolvedAspectScale`. A live-simulation caller driving `galaxySimulationStep` directly should
- * do the same — resolve it once (e.g. a `useMemo` keyed on the target ratio and the graph's own
- * structure) and pass `resolvedAspectScale` into every tick's options instead of a raw
- * `aspectRatio`. Deliberately key that memo on structure only, NOT on live drag/pin positions:
- * besides the performance reason above, a resolution that shifted mid-drag would read as the
- * whole layout's target shape subtly changing while the user is mid-gesture, which is worse UX
- * than the (already-accepted) tradeoff of the ellipse not tracking a temporarily-pinned node's
- * exact contribution to the natural-shape measurement.
- *
- * Returns {x: 1, y: 1} (no warp) when `aspectRatio` is omitted or exactly 1.
+ * Angular slot per satellite. Size-proportional slots (a balloon tree's) are the most compact, but
+ * the vision asks for evenly spaced orbits (design-material/galaxy/vision-statement.md item 3:
+ * every gap within ±50% of an equal 2π/k share). So: start proportional to system radius, then
+ * clamp every slot into [0.5, 1.5] × 2π/k, redistributing the excess among the unclamped slots
+ * (water-filling). Equal slots (Risacher's) waste space on deep trees: a big system in a narrow
+ * slot must sit far out, compounding level by level.
  */
-export function resolveAspectRatioScale(
+const SLOT_EVENNESS_BAND: readonly [number, number] = [0.5, 1.5]
+/** Extra clearance between a satellite and its parent body, as a fraction of the satellite's own
+ *  radius. Without it a 60px planet sat 5px from its parent and read as overlapping. */
+const SATELLITE_SPREAD = 0.5
+/** An only child turns this far off its parent's heading, so a chain curls like a galaxy's arm
+ *  instead of running off in a straight line. */
+const ONLY_CHILD_BEND = 0.7
+
+function slotAngles(systemRadii: readonly number[]): number[] {
+  const k = systemRadii.length
+  const ideal = (2 * Math.PI) / k
+  const [lo, hi] = [SLOT_EVENNESS_BAND[0] * ideal, SLOT_EVENNESS_BAND[1] * ideal]
+  const slot = new Map<number, number>()
+  // Water-filling: cap oversized shares first, then floor undersized ones, re-sharing the rest
+  // in proportion each round.
+  for (let round = 0; round <= 2 * k; round++) {
+    const free = systemRadii.map((_, i) => i).filter(i => !slot.has(i))
+    if (free.length === 0) break
+    const remaining = 2 * Math.PI - [...slot.values()].reduce((a, b) => a + b, 0)
+    const weight = free.reduce((a, i) => a + systemRadii[i], 0)
+    const share = (i: number) => (weight > 0 ? (remaining * systemRadii[i]) / weight : remaining / free.length)
+    const over = free.filter(i => share(i) > hi)
+    if (over.length) { for (const i of over) slot.set(i, hi); continue }
+    const under = free.filter(i => share(i) < lo)
+    if (under.length) { for (const i of under) slot.set(i, lo); continue }
+    for (const i of free) slot.set(i, share(i))
+    break
+  }
+  // Everything clamped: hand any leftover to the floored slots (or take an excess from the capped
+  // ones), so slots always fill the circle exactly.
+  let leftover = 2 * Math.PI - [...slot.values()].reduce((a, b) => a + b, 0)
+  if (Math.abs(leftover) > 1e-9) {
+    const pool = systemRadii.map((_, i) => i).filter(i => (leftover > 0 ? slot.get(i)! <= lo + 1e-12 : slot.get(i)! >= hi - 1e-12))
+    const targets = pool.length ? pool : systemRadii.map((_, i) => i)
+    for (const i of targets) slot.set(i, slot.get(i)! + leftover / targets.length)
+    leftover = 0
+  }
+  return systemRadii.map((_, i) => slot.get(i)!)
+}
+
+/** Smallest distance at which a satellite system of radius `sysR`, given an angular slot of
+ *  `theta`, clears its parent's body and stays inside its own slot's wedge (file header, step 2). */
+function orbitDistance(parentR: number, sysR: number, theta: number, gap: number): number {
+  const clearParent = parentR + gap + sysR
+  // A slot of π or more is no narrower than a half-plane: clearing the parent body is enough.
+  if (theta >= Math.PI) return clearParent
+  return Math.max(clearParent, (sysR + gap / 2) / Math.sin(theta / 2))
+}
+
+/**
+ * Smallest distance along a slot's bisector at which every body of a satellite's subtree clears the
+ * parent's body and stays inside the slot's wedge, both with the gap. `sub` is the subtree in its
+ * own frame (root at the origin, outward along +x = the bisector). Binary search between the
+ * nearest legal distance for the satellite's own body and the disc bound (the whole system as a
+ * disc of radius R inside the wedge), which is always feasible — so the result is never farther
+ * than the disc bound, and usually much nearer: a subtree mostly sits on its far side.
+ */
+function fitDistance(
+  parentR: number,
+  sub: LocalSystem,
+  satelliteR: number,
+  theta: number,
+  gap: number,
+  radiusOf: (id: string) => number
+): number {
+  const h = theta / 2
+  const bounded = theta < 2 * Math.PI - 1e-9
+  const rays = bounded ? [{ x: Math.cos(h), y: Math.sin(h) }, { x: Math.cos(h), y: -Math.sin(h) }] : []
+  const pts = [...sub.pts].map(([id, p]) => ({ p, rho: radiusOf(id) }))
+  const fits = (d: number): boolean => {
+    for (const { p, rho } of pts) {
+      const x = d + p.x
+      const y = p.y
+      // Clearance from the parent body grows with the body's own size, so a big planet swings
+      // visibly wide while a small moon still hugs its parent (Risacher: parent.r + 4 × child.r).
+      if (Math.hypot(x, y) < parentR + gap + rho * (1 + SATELLITE_SPREAD)) return false
+      if (!bounded) continue
+      if (Math.abs(Math.atan2(y, x)) > h) return false
+      for (const v of rays) {
+        const t = Math.max(0, x * v.x + y * v.y)
+        if (Math.hypot(x - t * v.x, y - t * v.y) < rho + gap / 2) return false
+      }
+    }
+    return true
+  }
+  let lo = parentR + gap + satelliteR * (1 + SATELLITE_SPREAD)
+  let hi = Math.max(lo, orbitDistance(parentR, sub.R * (1 + SATELLITE_SPREAD), theta, gap))
+  if (fits(lo)) return lo
+  for (let i = 0; i < 28 && hi - lo > 0.5; i++) {
+    const mid = (lo + hi) / 2
+    if (fits(mid)) hi = mid
+    else lo = mid
+  }
+  return hi
+}
+
+/** A subtree laid out around its own root at the origin, outward heading along +x. */
+interface LocalSystem {
+  pts: Map<string, { x: number; y: number }>
+  /** Exact extent: farthest body edge from the root's centre. */
+  R: number
+}
+
+/**
+ * Bottom-up (file header, steps 1-2): each subtree is laid out once in its own frame — root at the
+ * origin, heading +x — and placed into its parent's frame by rotation + translation. Galaxy
+ * placement is rotation-invariant (every angle is relative to the heading), so this is exact, and
+ * each system's extent R is measured, not bounded.
+ */
+function buildLocalSystems(forest: Forest): Map<string, LocalSystem> {
+  const { childrenOf, roots, weightOf, radiusOf, gap } = forest
+  const out = new Map<string, LocalSystem>()
+  // Children before parents, iteratively (deep chains overflowed the stack when this recursed).
+  const order = preOrder(roots, childrenOf).reverse()
+  for (const { id, depth, hasParent } of order) {
+    const r = radiusOf(id)
+    const pts = new Map<string, { x: number; y: number }>([[id, { x: 0, y: 0 }]])
+    const kids = heaviestFirst((childrenOf.get(id) ?? []).filter(k => out.has(k)), weightOf)
+    const subs = kids.map(k => out.get(k)!)
+    const k = kids.length
+    let angles: number[] = []
+    let distances: number[] = []
+    if (k === 1) {
+      angles = [hasParent ? ONLY_CHILD_BEND : 0]
+      distances = [fitDistance(r, subs[0], radiusOf(kids[0]), 2 * Math.PI, gap, radiusOf)]
+    } else if (k > 1) {
+      const thetas = slotAngles(subs.map(sub => sub.R))
+      let cursor = -thetas[0] / 2
+      for (const t of thetas) {
+        angles.push(cursor + t / 2)
+        cursor += t
+      }
+      // Below the root, rotate so the line back to the grandparent (angle π) falls on a slot
+      // boundary, not through a satellite's system (Risacher's half-slot offset, "to prevent lunar
+      // eclipses"); at most half a slot, so the heaviest stays within one slot of the heading.
+      // The turn alternates direction by depth: always turning the same way made a deep spine
+      // coil on itself and grow exponentially (a 3-leaf caterpillar reached 1e23 px at depth 250).
+      if (hasParent) {
+        const preferred = depth % 2 === 0 ? 1 : -1
+        let best = Infinity
+        let bestSigned = Infinity
+        let edge = -thetas[0] / 2
+        for (const t of thetas) {
+          const delta = Math.atan2(Math.sin(Math.PI - edge), Math.cos(Math.PI - edge))
+          if (Math.abs(delta) < Math.abs(best)) best = delta
+          if (Math.sign(delta) === preferred && Math.abs(delta) < Math.abs(bestSigned)) bestSigned = delta
+          edge += t
+        }
+        const rotation = Math.abs(bestSigned) <= thetas[0] ? bestSigned : best
+        angles = angles.map(a => a + rotation)
+      }
+      distances = subs.map((sub, i) => fitDistance(r, sub, radiusOf(kids[i]), thetas[i], gap, radiusOf))
+    }
+    let R = r
+    kids.forEach((_childId, i) => {
+      const a = angles[i]
+      const cos = Math.cos(a)
+      const sin = Math.sin(a)
+      const cx = distances[i] * cos
+      const cy = distances[i] * sin
+      for (const [mid, p] of subs[i].pts) {
+        const q = { x: cx + p.x * cos - p.y * sin, y: cy + p.x * sin + p.y * cos }
+        pts.set(mid, q)
+        R = Math.max(R, Math.hypot(q.x, q.y) + radiusOf(mid))
+      }
+    })
+    out.set(id, { pts, R })
+  }
+  return out
+}
+
+/**
+ * Leans a packed forest toward a container's width/height ratio: repeatedly compress galaxy
+ * centres along the short axis and push apart any galaxy circles that then overlap, until the
+ * arrangement's bounding box reaches the ratio (or stops changing). Moves whole galaxies only —
+ * orbits inside a galaxy are never warped (vision item 5).
+ */
+function arrangeToAspect(circles: { x: number; y: number; r: number }[], aspectRatio: number): void {
+  const target = Math.min(8, Math.max(1 / 8, aspectRatio))
+  const extent = (): { w: number; h: number } => ({
+    w: Math.max(...circles.map(c => c.x + c.r)) - Math.min(...circles.map(c => c.x - c.r)),
+    h: Math.max(...circles.map(c => c.y + c.r)) - Math.min(...circles.map(c => c.y - c.r)),
+  })
+  // How large the arrangement can be drawn in a target-shaped container: keep whichever round's
+  // arrangement fits best (squeezing a forest of very unequal galaxies can overshoot).
+  const fit = (): number => {
+    const { w, h } = extent()
+    return Math.min(target / w, 1 / h)
+  }
+  let best = { fit: fit(), at: circles.map(c => ({ x: c.x, y: c.y })) }
+  const wide = target >= 1
+  for (let round = 0; round < 80; round++) {
+    const { w, h } = extent()
+    if (wide ? w / h >= target : w / h <= target) break
+    for (const c of circles) {
+      if (wide) c.y *= 0.94
+      else c.x *= 0.94
+    }
+    for (let pass = 0; pass < 60; pass++) {
+      let moved = false
+      for (let i = 0; i < circles.length; i++) {
+        for (let j = i + 1; j < circles.length; j++) {
+          const a = circles[i], b = circles[j]
+          let dx = b.x - a.x, dy = b.y - a.y
+          let d = Math.hypot(dx, dy)
+          const need = a.r + b.r - d
+          if (need <= 1e-6) continue
+          if (d < 1e-9) { dx = wide ? 1 : 0; dy = wide ? 0 : 1; d = 1 }
+          a.x -= (dx / d) * need / 2; a.y -= (dy / d) * need / 2
+          b.x += (dx / d) * need / 2; b.y += (dy / d) * need / 2
+          moved = true
+        }
+      }
+      if (!moved) break
+    }
+    const f = fit()
+    if (f > best.fit) best = { fit: f, at: circles.map(c => ({ x: c.x, y: c.y })) }
+  }
+  circles.forEach((c, i) => {
+    c.x = best.at[i].x
+    c.y = best.at[i].y
+  })
+}
+
+function computeBaseHome(
+  forest: Forest,
+  startAngle: number,
+  aspectRatio?: number
+): Map<string, { x: number; y: number }> {
+  const { childrenOf, roots, weightOf, gap } = forest
+  const systems = buildLocalSystems(forest)
+  const home = new Map<string, { x: number; y: number }>()
+
+  // Step 3: pack the galaxies (each root's system circle) heaviest first, lean the arrangement
+  // toward the container's shape, then place each one.
+  // Lone nodes (no structural parent or children) are packed together as one cluster of their own,
+  // set apart by a wide gap: tucked into the gaps between galaxies they read as members of
+  // whichever galaxy they happened to land beside.
+  const ordered = heaviestFirst(roots, weightOf)
+  const lone = ordered.filter(id => (childrenOf.get(id) ?? []).length === 0)
+  const galaxies = ordered.filter(id => (childrenOf.get(id) ?? []).length > 0)
+  type Placed = { id: string; r: number; x: number; y: number }
+  const circles: Placed[] = galaxies.map(id => ({ id, r: systems.get(id)!.R + gap / 2, x: 0, y: 0 }))
+  let loneCircles: Placed[] = []
+  let loneGroup: Placed | undefined
+  if (lone.length && galaxies.length) {
+    loneCircles = lone.map(id => ({ id, r: systems.get(id)!.R + gap / 2, x: 0, y: 0 }))
+    packSiblings(loneCircles)
+    const enclosing = packEnclose(loneCircles)!
+    loneGroup = { id: '\u0000lone', r: enclosing.r + 2 * gap, x: 0, y: 0 }
+    loneCircles = loneCircles.map(c => ({ ...c, x: c.x - enclosing.x, y: c.y - enclosing.y }))
+    circles.push(loneGroup)
+  } else {
+    circles.push(...lone.map(id => ({ id, r: systems.get(id)!.R + gap / 2, x: 0, y: 0 })))
+  }
+  packSiblings(circles)
+  // arrangeToAspect is quadratic in galaxy count; past ARRANGE_MAX_GALAXIES the plain compact
+  // packing is kept (2 s at ~1500 galaxies otherwise).
+  if (aspectRatio !== undefined && Number.isFinite(aspectRatio) && circles.length > 1 && circles.length <= ARRANGE_MAX_GALAXIES) {
+    arrangeToAspect(circles, aspectRatio)
+  }
+  const cos = Math.cos(startAngle)
+  const sin = Math.sin(startAngle)
+  const placeGalaxy = (id: string, cx: number, cy: number): void => {
+    for (const [mid, p] of systems.get(id)!.pts) {
+      home.set(mid, { x: cx + p.x * cos - p.y * sin, y: cy + p.x * sin + p.y * cos })
+    }
+  }
+  for (const c of circles) {
+    if (c === loneGroup) for (const l of loneCircles) placeGalaxy(l.id, c.x + l.x, c.y + l.y)
+    else placeGalaxy(c.id, c.x, c.y)
+  }
+
+  return home
+}
+
+/** Shifts each pinned node's subtree so the node lands on its given position (outer pins first). */
+function applyPins(nodes: readonly GalaxyLayoutNode[], forest: Forest, base: ReadonlyMap<string, { x: number; y: number }>): Map<string, { x: number; y: number }> {
+  const { childrenOf, roots } = forest
+  const home = new Map(base)
+  const descendants = (id: string): string[] => preOrder([id], childrenOf).slice(1).map(x => x.id)
+  const depth = new Map(preOrder(roots, childrenOf).map(x => [x.id, x.depth]))
+  const pinned = nodes
+    .filter(n => n.pinned && n.x !== undefined && n.y !== undefined && home.has(n.id))
+    .sort((a, b) => (depth.get(a.id) ?? 0) - (depth.get(b.id) ?? 0))
+  for (const n of pinned) {
+    const at = home.get(n.id)!
+    const dx = n.x! - at.x
+    const dy = n.y! - at.y
+    if (dx === 0 && dy === 0) continue
+    for (const id of [n.id, ...descendants(n.id)]) {
+      const p = home.get(id)!
+      home.set(id, { x: p.x + dx, y: p.y + dy })
+    }
+  }
+  return home
+}
+
+// Live simulation calls galaxySimulationStep every animation frame. The pin-free construction only
+// changes when the structure, sizes or options do, and the pinned target only when a pin moves, so
+// both are cached (one entry each) instead of rebuilt per frame — arrangeToAspect alone is
+// quadratic in galaxy count (300 ms/frame at 500 roots before this).
+let baseCache: { key: string; edges: readonly GalaxyLayoutEdge[]; home: Map<string, { x: number; y: number }> } | undefined
+let pinnedCache: { key: string; edges: readonly GalaxyLayoutEdge[]; home: Map<string, { x: number; y: number }> } | undefined
+
+function structureKey(nodes: readonly GalaxyLayoutNode[], options: GalaxyLayoutOptions, startAngle: number): string {
+  const parts = nodes.map(n => `${n.id}|${n.width}|${n.height}|${n.radius ?? ''}|${n.weight ?? ''}`)
+  return `${startAngle}|${options.aspectRatio ?? ''}|${options.nodeMargin ?? ''}|${options.nodeSpread ?? ''}#${parts.join(';')}`
+}
+
+/** Home positions, pins applied and (when pinned) overlaps resolved on the target. Cached. */
+function computeHome(
   nodes: readonly GalaxyLayoutNode[],
   edges: readonly GalaxyLayoutEdge[],
-  options: GalaxyLayoutOptions = {}
-): { x: number; y: number } {
-  const { aspectRatio } = options
-  // Number.isFinite(NaN) is false, so this also catches a NaN ratio (e.g. a caller computing
-  // width/height from an unmeasured 0/0 element) — the [1/8, 8] clamp below guards Infinity, but
-  // Math.max(1/8, NaN) is still NaN, so an unguarded NaN would otherwise propagate through
-  // rawCorrection into every returned position.
-  if (aspectRatio === undefined || aspectRatio === 1 || !Number.isFinite(aspectRatio) || nodes.length === 0) return { x: 1, y: 1 }
-
-  const nodeMap = new Map(nodes.map(n => [n.id, n]))
-  const radiusOf = (n: GalaxyLayoutNode) => Math.hypot(n.width, n.height) / 2
-
-  // Natural (unwarped) shape, measured through one real settle step (home -> group separation ->
-  // individual separationPass -> homeStrength nudge) — not just the raw elliptical home position.
-  // This matters: a raw-home-only measurement (an earlier version of this function used
-  // computeHome + shiftGroupsApart directly, skipping individual separationPass and the
-  // homeStrength nudge) significantly OVERESTIMATES how much a given correction actually distorts
-  // the real, settled layout for a tree with several small, tightly-packed sibling groups — the
-  // group-level macro shift alone, unaided by individual-level separation, has to resolve overlap
-  // by brute rigid translation, while the real pipeline's individual pass resolves most of it far
-  // more cheaply. Measured concretely: a fixture with 5 sibling branches showed the raw-home
-  // proxy predicting area growth past 2x from almost the very first, smallest trial correction,
-  // while the actually-settled result stayed under 1.3x across the *entire* correction range —
-  // the raw proxy was rejecting every correction as unsafe when none of them actually were.
-  const naturalPos = galaxySimulationStep(nodes, edges, undefined, { ...options, resolvedAspectScale: { x: 1, y: 1 } })
-  const naturalBbox = weightedBboxOf(naturalPos, nodeMap, radiusOf)
-  const clampedTarget = Math.min(8, Math.max(1 / 8, aspectRatio))
-  const rawCorrection = Math.min(8, Math.max(1 / 8, clampedTarget / naturalBbox.ratio))
-
-  // Applying rawCorrection directly is not safe: `separationPass`/`shiftGroupsApart`'s collision
-  // floors resist *compression* but not *expansion*, so an uncapped correction doesn't trade
-  // width for height the way scaleX * scaleY === 1 suggests — it mostly just adds width, measured
-  // to inflate total rendered area by as much as 9x on real trees for one dataset, while on
-  // ANOTHER dataset the exact same fixed damping left the ratio barely improved at all (a badly
-  // overcorrecting fourth-root: fine for a mildly-biased tree, far too weak for a severely
-  // chain-dominated one — no single constant serves both). So instead of a fixed exponent, binary-
-  // search the exponent itself: find the strongest correction whose *actual, settled* rendered
-  // area stays within AREA_GROWTH_CAP of natural — one real settle step per trial (not the full
-  // multi-cycle settle loop galaxyLayout itself runs; one step is enough to be representative —
-  // see above — and each one measured well under 15ms even on a 50+-node stress dataset, six
-  // trials total, done once per resolution rather than once per settle cycle or animation frame).
-  const AREA_GROWTH_CAP = 2
-  const areaGrowthAt = (t: number): number => {
-    const trialCorrection = Math.pow(rawCorrection, t)
-    const trialPos = galaxySimulationStep(nodes, edges, undefined, {
-      ...options,
-      resolvedAspectScale: { x: trialCorrection, y: 1 / trialCorrection },
-    })
-    return weightedBboxOf(trialPos, nodeMap, radiusOf).area / naturalBbox.area
+  forest: Forest,
+  options: GalaxyLayoutOptions,
+  startAngle: number
+): Map<string, { x: number; y: number }> {
+  const key = structureKey(nodes, options, startAngle)
+  if (!baseCache || baseCache.key !== key || baseCache.edges !== edges) {
+    baseCache = { key, edges, home: computeBaseHome(forest, startAngle, options.aspectRatio) }
+    pinnedCache = undefined
   }
-  let lo = 0, hi = 1
-  for (let i = 0; i < 6; i++) {
-    const mid = (lo + hi) / 2
-    if (areaGrowthAt(mid) <= AREA_GROWTH_CAP) lo = mid
-    else hi = mid
+  const pins = nodes.filter(n => n.pinned && n.x !== undefined && n.y !== undefined)
+  if (pins.length === 0) return new Map(baseCache.home)
+  const pinKey = pins.map(n => `${n.id}@${n.x},${n.y}`).join(';')
+  if (!pinnedCache || pinnedCache.key !== pinKey || pinnedCache.edges !== edges) {
+    const home = applyPins(nodes, forest, baseCache.home)
+    // Pins can push a dragged system into its neighbours: resolve that on the TARGET (pinned nodes
+    // fixed). Separating the moving positions every tick fought the pull toward home forever.
+    separateUntilClear(nodes, home, forest.gap / 2)
+    pinnedCache = { key: pinKey, edges, home }
   }
-  const finalCorrection = Math.pow(rawCorrection, lo)
-  return { x: finalCorrection, y: 1 / finalCorrection }
+  return new Map(pinnedCache.home)
 }
 
 /**
- * Computes one settle iteration for a galaxy layout: recomputes every node's orbital "home"
- * position (see below), seeds/continues from `prevPositions` (or home/pinned positions if this
- * is the first call), runs one collision-separation pass, then nudges every unpinned node one
- * `homeStrength` fraction of the way toward its home. Exported so it can be driven either as a
- * bounded, synchronous batch (see galaxyLayout, which calls this `settleCycles` times) or as a
- * live, continuous simulation — e.g. GraphCanvas's opt-in live-simulation mode, which calls this
- * once per animation frame, feeding back its own previous frame's output as `prevPositions` and a
- * currently-dragged node's live pointer position as a `pinned` override — so dragging any node
- * (a "sun" or otherwise) elastically repositions its descendants in real time.
- *
- * Home positions are computed by a recursive walk that spreads each node's children evenly
- * around a full circle centered on it (not a half-arc fanned away from it — that full-circle
- * spread plus a parent-angle offset is what gives the layout its "galaxy arm" look instead of
- * reading as a plain radial org chart), seeded from a virtual hub at the origin so independent
- * root trees spread around a shared center. A pinned node's own actual position — not the
- * position the recursive walk would have otherwise assigned it — is used both as that node's own
- * home AND as the anchor its own children's home positions are computed relative to, so pinning
- * (or live-dragging) an ancestor cascades correctly to its whole subtree. When `options.aspectRatio`
- * is set, this walk's elliptical scale comes from `resolvedAspectScale` if the caller already
- * resolved one, or from resolving it fresh here otherwise — see `resolveAspectRatioScale` for the
- * natural-shape measurement and binary search behind that resolution, and why a single warp-a-
- * circle formula isn't enough on its own.
+ * @deprecated Kept for API compatibility. Since 2026-10-25 galaxy never warps its orbits to suit the
+ * container's aspect ratio — a galaxy's systems are round by definition (vision item 5) — so this
+ * always returns the identity scale.
+ */
+export function resolveAspectRatioScale(
+  _nodes: readonly GalaxyLayoutNode[],
+  _edges: readonly GalaxyLayoutEdge[],
+  _options: GalaxyLayoutOptions = {}
+): { x: number; y: number } {
+  return { x: 1, y: 1 }
+}
+
+/** Overlap safety net, only needed when pinned nodes break the construction. */
+function separateUntilClear(nodes: readonly GalaxyLayoutNode[], pos: Map<string, { x: number; y: number }>, margin: number): void {
+  const padded: LayoutNode[] = nodes.map(n => ({ id: n.id, width: n.width + margin, height: n.height + margin, pinned: n.pinned, x: 0, y: 0 }))
+  for (let pass = 0; pass < FINAL_CLEANUP_MAX_PASSES; pass++) {
+    if (!separationPass(padded, pos)) break
+  }
+}
+
+/**
+ * One live-simulation tick: recomputes every node's home (pinned/dragged nodes anchor their
+ * subtrees), then moves each unpinned node `homeStrength` of the way from `prevPositions` toward
+ * its home. Drive it once per animation frame, feeding back its own output; a dragged node passed
+ * as `pinned` carries its system with it. With nothing pinned, it converges to galaxyLayout's
+ * result.
  */
 export function galaxySimulationStep(
   nodes: readonly GalaxyLayoutNode[],
@@ -352,256 +595,62 @@ export function galaxySimulationStep(
   prevPositions: Map<string, { x: number; y: number }> | undefined,
   options: GalaxyLayoutOptions = {}
 ): Map<string, { x: number; y: number }> {
-  const {
-    nodeSpread = 3.2,
-    startAngle = -Math.PI / 2,
-    homeStrength = 0.18,
-    nodeMargin,
-    separateGroups = true,
-    resolvedAspectScale,
-  } = options
-
+  const { startAngle = Math.PI, homeStrength = 0.18 } = options
   if (nodes.length === 0) return new Map()
-
-  const nodeMap = new Map(nodes.map(n => [n.id, n]))
-  const radiusOf = (n: GalaxyLayoutNode) => Math.hypot(n.width, n.height) / 2
-
-  const { childrenOf, roots } = buildStructuralForest(nodes.map(n => n.id), edges)
-  const computeHome = buildComputeHome(nodeMap, childrenOf, roots, radiusOf, nodeSpread, startAngle)
-
-  // Grouping is purely structural (independent of ellipseX/ellipseY), so it's resolved once here
-  // and reused by the real effectiveHome computation below.
-  const { groupHeads, leafToGroup } = separateGroups
-    ? galaxyGroupMap(roots, childrenOf)
-    : { groupHeads: [] as string[], leafToGroup: new Map<string, string>() }
-
-  // See GalaxyLayoutOptions.aspectRatio / resolveAspectRatioScale for the full reasoning — the
-  // caller (galaxyLayout, or a live-simulation caller) is expected to have already resolved
-  // `options.aspectRatio` into `resolvedAspectScale` once and reused it across repeated calls;
-  // resolving it fresh here is only a fallback for a direct caller that didn't.
-  const scale = resolvedAspectScale ?? resolveAspectRatioScale(nodes, edges, options)
-  const home = computeHome(scale.x, scale.y)
-
-  // Group-separate the home positions themselves, not just a settled/pinned pos snapshot —
-  // otherwise every tick's homeStrength nudge pulls unpinned nodes straight back toward their
-  // raw, un-separated home, eroding a one-time position-level correction within a handful of
-  // frames regardless of how carefully it was computed. Cheap: same macro pass galaxyLayout's own
-  // final pass runs, minus its individual-node safety-net cleanup (unnecessary here — the
-  // separationPass call a few lines down, plus every subsequent tick's own pass, already keeps
-  // actual `pos` clear of individual overlap; this only needs the group-level shift).
-  const effectiveHome = separateGroups ? shiftGroupsApart(nodeMap, groupHeads, leafToGroup, home) : home
-
-  // Seed from prevPositions for continuity (a live tick nudges from wherever things currently
-  // are, never restarts from raw home) — falling back to home for any node not seen before (the
-  // very first call, or a node newly added mid-simulation). A pinned node always uses its own
-  // current x/y regardless of prevPositions, so a live drag's latest position immediately wins.
+  const forest = buildForest(nodes, edges, options)
+  const home = computeHome(nodes, edges, forest, options, startAngle)
   const pos = new Map<string, { x: number; y: number }>()
   for (const node of nodes) {
+    const h = home.get(node.id)!
     if (node.pinned && node.x !== undefined && node.y !== undefined) {
       pos.set(node.id, { x: node.x, y: node.y })
-    } else {
-      pos.set(node.id, prevPositions?.get(node.id) ?? effectiveHome.get(node.id)!)
+      continue
     }
-  }
-
-  // separationPass only reads id/width/height/pinned off each node — x/y live in `pos`.
-  const separationNodes: LayoutNode[] = nodes.map(n => ({ id: n.id, width: n.width, height: n.height, pinned: n.pinned, x: 0, y: 0 }))
-  // See GalaxyLayoutOptions.nodeMargin — unlike forceLayout's marginFor, undefined means 0
-  // (unpadded) here, not each node's own width.
-  const margin = nodeMargin ?? 0
-  const paddedSeparationNodes: LayoutNode[] = margin === 0
-    ? separationNodes
-    : nodes.map(n => ({ id: n.id, width: n.width + margin, height: n.height + margin, pinned: n.pinned, x: 0, y: 0 }))
-
-  separationPass(paddedSeparationNodes, pos)
-  for (const node of nodes) {
-    if (node.pinned) continue
-    const p = pos.get(node.id)!
-    const h = effectiveHome.get(node.id)!
+    const p = prevPositions?.get(node.id) ?? h
     pos.set(node.id, { x: p.x + (h.x - p.x) * homeStrength, y: p.y + (h.y - p.y) * homeStrength })
   }
-
-  // A dragged/dropped "sun" carries its own group's ACTUAL boundary circle wherever it goes —
-  // home-level separation above keeps the algorithmic TARGET layout non-overlapping, but says
-  // nothing about a group's real, currently-dragged footprint growing into a neighbor's real
-  // territory. Without this, that neighbor's nodes just sit there while the dragged group's
-  // (correctly rendered, honestly reaching) boundary circle balloons out to enclose them —
-  // reading as "I dragged a node into another group," even though membership never changed.
-  // React the same way collision avoidance already does for individual nodes: push the *other*
-  // groups' real positions out of the way, leaving whichever group contains a currently-pinned
-  // node exactly where the user put it. Only worth the extra pass when something's actually
-  // pinned — absent that, `pos` already tracks `effectiveHome` closely enough (see the dedicated
-  // regression test) that a second group-level correction here would just be wasted work.
-  if (separateGroups && groupHeads.length > 1) {
-    const pinnedGroups = new Set<string>()
-    for (const node of nodes) {
-      if (!node.pinned || node.x === undefined || node.y === undefined) continue
-      const groupId = leafToGroup.get(node.id)
-      if (groupId) pinnedGroups.add(groupId)
-    }
-    if (pinnedGroups.size > 0) {
-      return shiftGroupsApart(nodeMap, groupHeads, leafToGroup, pos, pinnedGroups)
-    }
-  }
-
   return pos
 }
 
 /**
- * Positions nodes as a radial hierarchy of orbits — a "galaxy": each node's children are spread
- * evenly around a full circle centered on it, offset by the parent's own angle so descendants
- * read as a loose spiral rather than straight spokes (see galaxySimulationStep for the exact
- * placement rule). Only `structural` edges shape that hierarchy; other edges are layout-irrelevant
- * (callers still render them — see GraphCanvas's isStructuralEdge prop).
- *
- * A node with no structural parent (including one connected only by non-structural edges, or
- * not connected at all) becomes its own root and gets an orbit of its own around the shared
- * center, same as any other root.
- *
- * The radial position is a "home" the node settles near, not a fixed slot: this runs
- * galaxySimulationStep `settleCycles` times in a row (each cycle alternates capped collision
- * separation with a gentle pull back toward home), then a final unpadded cleanup pass, then — by
- * default — a group-separation pass (see GalaxyLayoutOptions.separateGroups) so top-level group
- * regions don't crowd into each other either.
+ * Positions nodes as galaxies: see the file header for the construction. Only `structural` edges
+ * shape the hierarchy; other edges are layout-irrelevant (callers still render them — see
+ * GraphCanvas's isStructuralEdge prop). A node with no structural parent (including one connected
+ * only by non-structural edges, or not at all) is the root of its own galaxy.
  */
 export function galaxyLayout(
   nodes: readonly GalaxyLayoutNode[],
   edges: readonly GalaxyLayoutEdge[],
   options: GalaxyLayoutOptions = {}
 ): Map<string, { x: number; y: number }> {
-  const { settleCycles = 24, separateGroups = true } = options
-
+  const { startAngle = Math.PI } = options
   if (nodes.length === 0) return new Map()
-
-  // Resolved once here rather than left for galaxySimulationStep to resolve itself on every one
-  // of the settleCycles calls below — see resolveAspectRatioScale's own docs for why re-resolving
-  // it that many times over would be far more expensive than the settle loop it's feeding.
-  const resolvedAspectScale = resolveAspectRatioScale(nodes, edges, options)
-  const stepOptions: GalaxyLayoutOptions = { ...options, resolvedAspectScale }
-
-  let pos: Map<string, { x: number; y: number }> | undefined
-  for (let cycle = 0; cycle < settleCycles; cycle++) {
-    pos = galaxySimulationStep(nodes, edges, pos, stepOptions)
-  }
-  // settleCycles: 0 is an unusual but legal input (skips the settle loop above) — still run one
-  // step so `pos` is always defined, rather than falling back to raw unseparated home positions.
-  if (!pos) pos = galaxySimulationStep(nodes, edges, undefined, stepOptions)
-
-  // Shares forceLayout's cleanup-pass budget (see FINAL_CLEANUP_MAX_PASSES) rather than its own
-  // independent constant — a dense orbit of large/card-sized nodes can hit the same non-convergence
-  // case forceLayout needed a larger budget for.
-  const separationNodes: LayoutNode[] = nodes.map(n => ({ id: n.id, width: n.width, height: n.height, pinned: n.pinned, x: 0, y: 0 }))
-  for (let pass = 0; pass < FINAL_CLEANUP_MAX_PASSES; pass++) {
-    if (!separationPass(separationNodes, pos)) break
-  }
-
-  if (separateGroups) {
-    pos = applyGroupSeparation(nodes, edges, pos)
-  }
-
-  return pos
+  const forest = buildForest(nodes, edges, options)
+  return computeHome(nodes, edges, forest, options, startAngle)
 }
 
 /**
- * Pushes apart any top-level group boundary circles (see boundingCirclesByGroup,
- * galaxyGroupHeads) that overlap each other, then rigidly translates each group's members by the
- * same delta so each group's already-correct internal arrangement is preserved. Plain separation
- * between group pseudo-nodes, not a spring simulation — galaxy groups aren't meaningfully
- * "spring-connected" to each other, and pulling unrelated groups together would fight the radial
- * structure the algorithm is built around. `pinnedGroups` (if any) keeps those groups' pseudo-
- * nodes fixed in the macro pass — used for a currently-dragged group's real footprint, which
- * should displace its neighbors rather than get displaced itself.
- *
- * No individual-node safety-net cleanup here — this is the shared core every caller (galaxyLayout's
- * final pass, and galaxySimulationStep's every-tick home computation AND its reactive real-position
- * push-away while something's pinned) calls directly; galaxyLayout's own final pass runs its own
- * cleanup afterward on the actual settled positions (see applyGroupSeparation below), the others
- * don't need one — `home` is a target to pull toward, not something that itself needs to end up
- * overlap-free, and the real per-tick `pos` already gets its own separationPass call regardless of
- * this. Cheap enough for every animation frame either way: `positions` in, one O(n) boundary
- * computation, one bounded O(g²) macro-separation loop (g = number of top-level groups, always
- * small), one O(g·n) rigid translate.
+ * Boundary disc per group: the smallest circle enclosing every member's body (d3 packEnclose).
+ * Galaxy's satellites mostly extend outward from their head, so a disc centred on the head and
+ * sized to its farthest member (boundingCirclesByGroup's anchorToHead) swings back over the
+ * parent and neighbouring systems; the minimal enclosing circle hugs the system instead.
  */
-function shiftGroupsApart(
-  nodeMap: ReadonlyMap<string, GalaxyLayoutNode>,
-  groupHeads: readonly string[],
-  leafToGroup: Map<string, string>,
-  positions: Map<string, { x: number; y: number }>,
-  pinnedGroups?: ReadonlySet<string>
-): Map<string, { x: number; y: number }> {
-  if (groupHeads.length <= 1) return positions
-
-  const radiusOf = (id: string): number => {
-    const n = nodeMap.get(id)
-    return n ? Math.hypot(n.width, n.height) / 2 : 20
+export function galaxySystemCircles(
+  positions: ReadonlyMap<string, { x: number; y: number }>,
+  leafToGroup: ReadonlyMap<string, string>,
+  radiusOf: (id: string) => number
+): Map<string, { x: number; y: number; r: number }> {
+  const members = new Map<string, { x: number; y: number; r: number }[]>()
+  for (const [id, group] of leafToGroup) {
+    const p = positions.get(id)
+    if (!p) continue
+    if (!members.has(group)) members.set(group, [])
+    members.get(group)!.push({ x: p.x, y: p.y, r: radiusOf(id) })
   }
-  const layoutNodes: LayoutNode[] = [...nodeMap.values()].map(n => ({ id: n.id, width: n.width, height: n.height, x: 0, y: 0 }))
-  // anchorToHead: true — must match GraphCanvas's own boundingCirclesByGroup call for rendering
-  // (see its comment); otherwise this pass would separate the centroid-based circles while the
-  // rendered head-anchored ones stayed exactly where they were, reintroducing visible overlap.
-  const boundaries = boundingCirclesByGroup(layoutNodes, positions, leafToGroup, radiusOf, true)
-
-  // macroNodes' own x/y are ignored by separationPass (it only reads pos, which macroPos below
-  // seeds with the real circle centers) — set to 0 for clarity, same convention every other
-  // separationPass call in this file already uses.
-  const macroNodes: LayoutNode[] = [...boundaries.entries()].map(([id, c]) => ({
-    id, x: 0, y: 0, width: c.r * 2, height: c.r * 2, pinned: pinnedGroups?.has(id),
-  }))
-  const macroPos = new Map([...boundaries.entries()].map(([id, c]) => [id, { x: c.x, y: c.y }]))
-  for (let pass = 0; pass < FINAL_CLEANUP_MAX_PASSES; pass++) {
-    if (!separationPass(macroNodes, macroPos)) break
+  const out = new Map<string, { x: number; y: number; r: number }>()
+  for (const [group, circles] of members) {
+    const c = packEnclose(circles)
+    if (c) out.set(group, { x: c.x, y: c.y, r: c.r })
   }
-
-  const next = new Map(positions)
-  for (const [groupId, originalCircle] of boundaries) {
-    const shifted = macroPos.get(groupId)!
-    const dx = shifted.x - originalCircle.x
-    const dy = shifted.y - originalCircle.y
-    if (dx === 0 && dy === 0) continue
-    for (const [nodeId, groupOf] of leafToGroup) {
-      if (groupOf !== groupId) continue
-      const p = next.get(nodeId)
-      if (!p) continue
-      next.set(nodeId, { x: p.x + dx, y: p.y + dy })
-    }
-  }
-
-  return next
-}
-
-/**
- * galaxyLayout's own final post-process: shiftGroupsApart on the actually-settled positions, plus
- * an individual-node safety-net cleanup pass (the rigid group shift is sized to clear the
- * conservative bounding circles, so new individual-node overlap at a group boundary should be
- * rare, but cheap to guard against). Only called once per galaxyLayout() invocation, not from
- * every live-simulation tick — see shiftGroupsApart's own docs for where the per-tick equivalent
- * lives and why it skips this cleanup step.
- */
-function applyGroupSeparation(
-  nodes: readonly GalaxyLayoutNode[],
-  edges: readonly GalaxyLayoutEdge[],
-  pos: Map<string, { x: number; y: number }>
-): Map<string, { x: number; y: number }> {
-  const { childrenOf, roots } = buildStructuralForest(nodes.map(n => n.id), edges)
-  const nodeMap = new Map(nodes.map(n => [n.id, n]))
-  const { groupHeads, leafToGroup } = galaxyGroupMap(roots, childrenOf)
-  // Same pinned-group carve-out galaxySimulationStep's own reactive push-away uses (see its docs
-  // a few lines above) — without this, galaxyLayout's one-shot batch entry point would rigidly
-  // translate a pinned node's whole group right along with everyone else's, silently ignoring the
-  // pin the caller asked for.
-  const pinnedGroups = new Set<string>()
-  for (const node of nodes) {
-    if (!node.pinned || node.x === undefined || node.y === undefined) continue
-    const groupId = leafToGroup.get(node.id)
-    if (groupId) pinnedGroups.add(groupId)
-  }
-  const next = shiftGroupsApart(nodeMap, groupHeads, leafToGroup, pos, pinnedGroups.size > 0 ? pinnedGroups : undefined)
-  if (next === pos) return pos
-
-  const cleanupNodes: LayoutNode[] = nodes.map(n => ({ id: n.id, width: n.width, height: n.height, pinned: n.pinned, x: 0, y: 0 }))
-  for (let pass = 0; pass < FINAL_CLEANUP_MAX_PASSES; pass++) {
-    if (!separationPass(cleanupNodes, next)) break
-  }
-
-  return next
+  return out
 }

@@ -20,11 +20,13 @@ import { routeNavigationEdge, routeNavigationEdges, DEFAULT_TRACE_SPACING } from
 import {
   forceLayout,
   clusteredForceLayout,
-  boundingCirclesByGroup,
 } from "../utils/graphLayout";
 import {
   galaxyLayout,
-  resolveAspectRatioScale,
+  galaxyEffectiveWeights,
+  galaxyBodyRadii,
+  galaxySystemCircles,
+  GALAXY_UNWEIGHTED_MIN_RADIUS,
   type GalaxyLayoutNode,
 } from "../utils/galaxyLayout";
 import { uxNavLayout } from "../utils/uxNavLayout";
@@ -75,6 +77,14 @@ export interface GraphNodeData {
   /** Explicit position. When omitted with layout="force", the engine places the node. */
   x?: number;
   y?: number;
+  /**
+   * layout="galaxy" only (ignored by every other layout): the node's size weight, e.g. a budget
+   * figure or headcount. Galaxy draws each node as a round body whose AREA is proportional to its
+   * weight, and orbits each parent's children heaviest-first. A node without a weight weighs the
+   * sum of its structural children; when no node has one, every node weighs its subtree leaf
+   * count. Not related to `GraphEdge.weight`, which is an edge's stroke width.
+   */
+  weight?: number;
 }
 
 export interface GraphEdge {
@@ -188,6 +198,21 @@ function safeRenderNodeCallback(
     console.error("Error in renderNode callback:", error);
     return null;
   }
+}
+
+// layout="galaxy" boundary discs: one per group head (galaxyGroupHeads: a root with several
+// children hands each child its own disc). galaxyGroupMap also files such a delegating root under
+// its first child's group (needed by the old group separation); for drawing that is wrong — the
+// disc stretches from the child out to the root and covers half the galaxy — so the delegating
+// root belongs to no disc.
+function galaxyDiscGroups(
+  roots: readonly string[],
+  childrenOf: ReadonlyMap<string, string[]>,
+): Map<string, string> {
+  const { groupHeads, leafToGroup } = galaxyGroupMap(roots, childrenOf);
+  const heads = new Set(groupHeads);
+  for (const root of roots) if (!heads.has(root)) leafToGroup.delete(root);
+  return leafToGroup;
 }
 
 function safeIsStructuralEdge(
@@ -581,11 +606,10 @@ export interface GraphCanvasProps extends Omit<
    * substantial cards (renderNode content) could otherwise read as if edges were missing
    * entirely. Defaults differ by engine: "force" defaults to each node's own rendered width
    * (scales sensibly for both compact chips and larger cards with no configuration — see
-   * ForceLayoutOptions.nodeMargin); "galaxy" defaults to 0 (unpadded) since its nodeSpread-based
-   * placement already spaces most of the layout generously, and defaulting this on would shift
-   * every existing galaxy layout's node positions for a fix to a narrow edge case — see
-   * GalaxyLayoutOptions.nodeMargin. Pass a fixed number for either engine to use the same margin
-   * for every node.
+   * ForceLayoutOptions.nodeMargin). "galaxy" leaves it unset by default and uses its own gap
+   * (0.6 × the median body radius, at least 12 px); a number given here REPLACES that gap, so
+   * 0 means systems and bodies touch — see GalaxyLayoutOptions.nodeMargin. Pass a fixed number
+   * for either engine to use the same margin for every node.
    */
   nodeMargin?: number;
   /**
@@ -593,7 +617,9 @@ export interface GraphCanvasProps extends Omit<
    * circle around each top-level group the engine produced — galaxy's independent root subtrees,
    * force-clustered's top-level Louvain clusters, or radial-tree's trunk root points — same visual
    * language either way, so a caller can switch between the engines without the "what groups with
-   * what" affordance disappearing. Default true (matches force-clustered's behavior before this prop existed).
+   * what" affordance disappearing. Default true, except layout="galaxy", where it defaults to false
+   * (grouping reads from orbits and colour, as in the original galaxy charts; galaxy's discs, when
+   * shown, are the smallest circle enclosing each planet's system).
    */
   showClusterBoundaries?: boolean;
   /**
@@ -737,7 +763,7 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
       renderEdge,
       layout = "manual",
       nodeMargin,
-      showClusterBoundaries = true,
+      showClusterBoundaries: showClusterBoundariesProp,
       showHierarchyRings = false,
       isStructuralEdge,
       structuralEdgeCurvature = DEFAULT_QUADRATIC_CURVATURE,
@@ -764,6 +790,10 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
     },
     ref,
   ) => {
+    // Galaxy draws no boundary discs unless asked: grouping reads from orbits and per-galaxy colour,
+    // as in the original galaxy charts, and discs around lopsided systems covered half the view.
+    // Every other layout keeps the existing default (on).
+    const showClusterBoundaries = showClusterBoundariesProp ?? layout !== "galaxy";
     const [dims, setDims] = useState<NodeDims>(new Map());
     const [computedPositions, setComputedPositions] = useState<NodePositions>(
       new Map(),
@@ -980,6 +1010,51 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
       );
     }, [nodes, edges, isStructuralEdge, layout]);
 
+    // layout="galaxy": each node's effective weight, over the FULL forest (so collapsing a subtree
+    // never changes its parent's weight or makes bodies resize), and — when galaxy draws its own
+    // default bodies (no renderNode) — each node's round-body radius, area ∝ weight.
+    const galaxyWeights = useMemo(() => {
+      if (layout !== "galaxy") return null;
+      const weightById = new Map(nodes.map((n) => [n.id, n.weight]));
+      return galaxyEffectiveWeights(
+        nodes.map((n) => n.id),
+        forest.childrenOf,
+        (id) => weightById.get(id),
+      );
+    }, [layout, nodes, forest]);
+    // Sizes from leaf counts (no node has a weight) get a higher floor, so leaves are big enough
+    // to carry a label; real weights keep the full range, where small really means small.
+    const galaxyHasGivenWeights = useMemo(
+      () => nodes.some((n) => n.weight !== undefined && Number.isFinite(n.weight) && n.weight >= 0),
+      [nodes],
+    );
+    const galaxyRadii = useMemo(
+      () =>
+        galaxyWeights && !renderNode
+          ? galaxyBodyRadii(galaxyWeights, galaxyHasGivenWeights ? {} : { minRadius: GALAXY_UNWEIGHTED_MIN_RADIUS })
+          : null,
+      [galaxyWeights, renderNode, galaxyHasGivenWeights],
+    );
+    // The galaxy-only fields every galaxy layout-node builder adds (see GalaxyLayoutNode).
+    const galaxyNodeExtras = useCallback(
+      (id: string): Pick<GalaxyLayoutNode, "weight" | "radius"> => ({
+        weight: galaxyWeights?.get(id),
+        radius: galaxyRadii?.get(id),
+      }),
+      [galaxyWeights, galaxyRadii],
+    );
+    // Boundary-circle radius for galaxy: the true body radius when galaxy draws round bodies,
+    // otherwise the measured box's half-diagonal.
+    const galaxyBoundaryRadiusOf = useCallback(
+      (id: string): number => {
+        const r = galaxyRadii?.get(id);
+        if (r !== undefined) return r;
+        const d = dims.get(id);
+        return d ? Math.hypot(d.width, d.height) / 2 : 20;
+      },
+      [galaxyRadii, dims],
+    );
+
     // Every structural descendant of a collapsed node is hidden — not just its direct children.
     const hiddenIds = useMemo(() => {
       if (!collapsedNodeIds || collapsedNodeIds.size === 0)
@@ -1165,7 +1240,7 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
         });
       }
       setDims(next);
-    }, [visibleNodes, renderNode]);
+    }, [visibleNodes, renderNode, galaxyRadii]);
 
     // Run the engine layout when dims are ready (only for layout='force' | 'galaxy' | 'force-clustered' | 'ux-navigation' | 'radial-tree')
     useEffect(() => {
@@ -1255,10 +1330,14 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
           target: e.targetId,
           structural: safeIsStructuralEdge(isStructuralEdge, e, layout),
         }));
-        const positions = galaxyLayout(layoutNodes, layoutEdges, {
-          nodeMargin,
-          aspectRatio: galaxyAspectRatioRef.current,
-        });
+        const positions = galaxyLayout(
+          layoutNodes.map((n) => ({ ...n, ...galaxyNodeExtras(n.id) })),
+          layoutEdges,
+          {
+            nodeMargin,
+            aspectRatio: galaxyAspectRatioRef.current,
+          },
+        );
         setComputedPositions(positions);
         // galaxyLayout has no "cluster" concept of its own to return boundaries from (unlike
         // clusteredForceLayout), so build one here from `forest`. One boundary per root would be
@@ -1268,19 +1347,10 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
         // one boundary each, same as before, since a childless root has nothing to delegate to);
         // each group head's full recursive subtree is then one boundary, same as a Louvain
         // cluster's members are for force-clustered.
-        const { leafToGroup } = galaxyGroupMap(forest.roots, forest.childrenOf);
-        const radiusOf = (id: string): number => {
-          const d = dims.get(id);
-          return d ? Math.hypot(d.width, d.height) / 2 : 20;
-        };
+        const leafToGroup = galaxyDiscGroups(forest.roots, forest.childrenOf);
+        const radiusOf = galaxyBoundaryRadiusOf;
         setClusterBoundaries(
-          boundingCirclesByGroup(
-            layoutNodes,
-            positions,
-            leafToGroup,
-            radiusOf,
-            true,
-          ),
+          galaxySystemCircles(positions, leafToGroup, radiusOf),
         );
         setRingGeometry([]);
       }
@@ -1295,6 +1365,8 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
       forest,
       nodes,
       collapsedNodeIds,
+      galaxyNodeExtras,
+      galaxyBoundaryRadiusOf,
     ]);
 
     // A node's dragPositions override doubles as its pin here, same priority getNodePosition
@@ -1317,9 +1389,10 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
             x,
             y,
             pinned: x !== undefined && y !== undefined,
+            ...galaxyNodeExtras(n.id),
           };
         }),
-      [visibleNodes, dims, dragPositions],
+      [visibleNodes, dims, dragPositions, galaxyNodeExtras],
     );
 
     // Live-simulation mode's own continuous layout (see useGalaxySimulation). Builds
@@ -1339,45 +1412,13 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
       }));
     }, [liveActive, edges, isStructuralEdge, layout]);
 
-    // A drag/pin-independent view of the same nodes, purely for resolving the aspectRatio scale
-    // below — deliberately NOT `liveLayoutNodes` (which changes identity every animation frame
-    // during a drag, via `dragPositions`). Resolving the scale is expensive enough (a bounded
-    // search — see resolveAspectRatioScale) that re-running it every frame would blow the
-    // animation-frame budget; keying it on structure only means it only re-resolves when the
-    // graph's actual shape or the target ratio changes, not on every pointer move.
-    const galaxyStructuralNodes = useMemo<GalaxyLayoutNode[]>(() => {
-      if (!liveActive) return [];
-      return visibleNodes.map((n) => ({
-        id: n.id,
-        width: dims.get(n.id)?.width ?? DEFAULT_NODE_W,
-        height: dims.get(n.id)?.height ?? DEFAULT_NODE_H,
-      }));
-    }, [liveActive, visibleNodes, dims]);
-
-    // Pre-resolved once here (see GalaxyLayoutOptions.resolvedAspectScale /
-    // resolveAspectRatioScale's own docs for why) rather than left for every live-simulation
-    // animation frame to resolve for itself.
-    const galaxyResolvedAspectScale = useMemo(() => {
-      if (!liveActive || galaxyAspectRatio === undefined) return undefined;
-      return resolveAspectRatioScale(galaxyStructuralNodes, liveLayoutEdges, {
-        nodeMargin,
-        aspectRatio: galaxyAspectRatio,
-      });
-    }, [
-      liveActive,
-      galaxyStructuralNodes,
-      liveLayoutEdges,
-      nodeMargin,
-      galaxyAspectRatio,
-    ]);
-
     // Topology-only half of the boundary-circle grouping (see the static engine-layout effect's
     // own galaxy branch above, which this mirrors) — depends on `forest`, not on positions, so it
     // stays cheap to recompute every live-simulation tick below rather than needing its own
     // separate effect/state.
     const galaxyLeafToGroup = useMemo(() => {
       if (!liveActive) return null;
-      return galaxyGroupMap(forest.roots, forest.childrenOf).leafToGroup;
+      return galaxyDiscGroups(forest.roots, forest.childrenOf);
     }, [liveActive, forest]);
 
     // While live simulation owns computedPositions, it must also own clusterBoundaries — the
@@ -1389,38 +1430,23 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
       (positions: Map<string, { x: number; y: number }>) => {
         setComputedPositions(positions);
         if (!showClusterBoundaries || !galaxyLeafToGroup) return;
-        const boundaryNodes = visibleNodes.map((n) => ({
-          id: n.id,
-          width: dims.get(n.id)?.width ?? DEFAULT_NODE_W,
-          height: dims.get(n.id)?.height ?? DEFAULT_NODE_H,
-          x: 0,
-          y: 0,
-        }));
-        const radiusOf = (id: string): number => {
-          const d = dims.get(id);
-          return d ? Math.hypot(d.width, d.height) / 2 : 20;
-        };
+        const radiusOf = galaxyBoundaryRadiusOf;
         setClusterBoundaries(
-          boundingCirclesByGroup(
-            boundaryNodes,
-            positions,
-            galaxyLeafToGroup,
-            radiusOf,
-            true,
-          ),
+          galaxySystemCircles(positions, galaxyLeafToGroup, radiusOf),
         );
       },
-      [showClusterBoundaries, galaxyLeafToGroup, visibleNodes, dims],
+      [showClusterBoundaries, galaxyLeafToGroup, galaxyBoundaryRadiusOf],
     );
 
     const { wake: wakeGalaxySimulation } = useGalaxySimulation({
       active: liveActive,
       nodes: liveLayoutNodes,
       edges: liveLayoutEdges,
+      // galaxySimulationStep caches its own construction per structure and aspect ratio, so the
+      // per-frame cost is just the ease toward home (the old pre-resolved aspect scale is gone).
       options: {
         nodeMargin,
         aspectRatio: galaxyAspectRatio,
-        resolvedAspectScale: galaxyResolvedAspectScale,
       },
       onTick: handleLiveTick,
       initialPositions: computedPositions,
@@ -1726,29 +1752,10 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
 
       // Boundary circles must track the reshaped positions too — same computation the static
       // engine-layout effect's own galaxy branch already does.
-      const { leafToGroup } = galaxyGroupMap(forest.roots, forest.childrenOf);
-      const radiusOf = (id: string): number => {
-        const d = dims.get(id);
-        return d ? Math.hypot(d.width, d.height) / 2 : 20;
-      };
-      // boundingCirclesByGroup only reads id/width/height off each node (positions come from the
-      // separate `positions` map) — x/y here are dummy placeholders, same convention used
-      // elsewhere in this file (see handleLiveTick's own boundaryNodes).
-      const boundaryNodes = layoutNodes.map((n) => ({
-        id: n.id,
-        width: n.width,
-        height: n.height,
-        x: 0,
-        y: 0,
-      }));
+      const leafToGroup = galaxyDiscGroups(forest.roots, forest.childrenOf);
+      const radiusOf = galaxyBoundaryRadiusOf;
       setClusterBoundaries(
-        boundingCirclesByGroup(
-          boundaryNodes,
-          positions,
-          leafToGroup,
-          radiusOf,
-          true,
-        ),
+        galaxySystemCircles(positions, leafToGroup, radiusOf),
       );
 
       // Re-frame using the just-computed `positions` directly, not stale `computedPositions` state
@@ -1915,9 +1922,10 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
           width: DEFAULT_NODE_W,
           height: DEFAULT_NODE_H,
         };
-        return { x: pos.x, y: pos.y, width: d.width, height: d.height };
+        const radius = galaxyRadii?.get(id);
+        return { x: pos.x, y: pos.y, width: d.width, height: d.height, ...(radius !== undefined ? { radius } : {}) };
       },
-      [nodes, visibleNodes, dims, getNodePosition],
+      [nodes, visibleNodes, dims, getNodePosition, galaxyRadii],
     );
 
     // Node dragging. Pointer capture is deliberately NOT taken on pointerdown — capturing
@@ -2143,6 +2151,7 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
           return safeRenderNodeCallback(renderNode, node, selected, hierarchy, nodeProps);
         return (
           <GraphNode
+            bodyRadius={galaxyRadii?.get(node.id)}
             id={node.id}
             label={node.label}
             kind={node.kind}
@@ -2160,7 +2169,7 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
           />
         );
       },
-      [renderNode, onNodeSelect, hierarchyMetaFor, nodePopover, nodeTooltip, nodeTooltipTrigger, handleNodePopoverOpen, activePopoverNodeId],
+      [renderNode, onNodeSelect, hierarchyMetaFor, nodePopover, nodeTooltip, nodeTooltipTrigger, handleNodePopoverOpen, activePopoverNodeId, galaxyRadii],
     );
 
     // World-space anchor (node's top-center, or an edge path's midpoint) for the nodeTooltip/
@@ -2537,13 +2546,18 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
                   const isPopoverOpen = activePopoverEdgeId === edge.id;
                   const tooltipId = tooltipTarget?.type === 'edge' && tooltipTarget.edgeId === edge.id ? tooltipTarget.tooltipId : undefined;
                   const edgeCurvature = edge.curvature ?? (structural ? structuralEdgeCurvature : undefined);
+                  // Galaxy: a structural edge is an orbit link — the geometry already says
+                  // "contains" — so its label only shows when the edge or an end is in focus.
+                  // Labels on every orbit link buried the bodies (the original charts draw none).
+                  const edgeLabel =
+                    layout === "galaxy" && structural && !touchesFocus ? undefined : edge.label;
                   return (
                     <GraphEdgeInternal
                       key={edge.id}
                       id={edge.id}
                       sourceId={edge.sourceId}
                       targetId={edge.targetId}
-                      label={edge.label}
+                      label={edgeLabel}
                       variant={edge.variant}
                       weight={edge.weight}
                       opacity={edge.opacity}

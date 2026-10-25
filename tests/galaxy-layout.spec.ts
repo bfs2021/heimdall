@@ -14,16 +14,31 @@ function structuralEdge(source: string, target: string): GalaxyLayoutEdge {
 // Every top-level group's boundary circle, keyed by group head id — same computation
 // GraphCanvas's showClusterBoundaries rendering uses, reused here to verify Part 1 directly
 // rather than just trusting the algorithm did the right thing.
-function groupBoundaries(nodes: readonly GalaxyLayoutNode[], edges: readonly GalaxyLayoutEdge[], positions: Map<string, { x: number; y: number }>) {
+// Galaxy's group separation separates whole galaxies — one group per structural root (2026-10-24;
+// previously each delegated child subtree of a bushy root was its own group, which rigidly moved
+// satellite systems off their orbital slots). So "groups" here are per root too.
+function rootGroups(nodes: readonly GalaxyLayoutNode[], edges: readonly GalaxyLayoutEdge[]): Map<string, string> {
   const { childrenOf, roots } = buildStructuralForest(nodes.map(n => n.id), edges)
-  const { leafToGroup } = galaxyGroupMap(roots, childrenOf)
+  const leafToGroup = new Map<string, string>()
+  const visit = (id: string, root: string): void => {
+    leafToGroup.set(id, root)
+    for (const k of childrenOf.get(id) ?? []) visit(k, root)
+  }
+  for (const r of roots) visit(r, r)
+  return leafToGroup
+}
+
+function groupBoundaries(nodes: readonly GalaxyLayoutNode[], edges: readonly GalaxyLayoutEdge[], positions: Map<string, { x: number; y: number }>) {
+  const leafToGroup = rootGroups(nodes, edges)
   const nodeMap = new Map(nodes.map(n => [n.id, n]))
   const radiusOf = (id: string) => {
     const n = nodeMap.get(id)
     return n ? Math.hypot(n.width, n.height) / 2 : 20
   }
   const layoutNodes = nodes.map(n => ({ id: n.id, width: n.width, height: n.height, x: 0, y: 0 }))
-  return boundingCirclesByGroup(layoutNodes, positions, leafToGroup, radiusOf)
+  // anchorToHead: each galaxy's circle centred on its own root, exactly as galaxy's separation pass
+  // and GraphCanvas's rendered discs define it (a centroid circle drifts off a lopsided galaxy).
+  return boundingCirclesByGroup(layoutNodes, positions, leafToGroup, radiusOf, true)
 }
 
 function worstGroupOverlap(boundaries: Map<string, { x: number; y: number; r: number }>): number {
@@ -140,46 +155,34 @@ test.describe('galaxyLayout', () => {
   // right in the shared hub's crowded middle — visually disconnected from its own descendants,
   // which fan out far beyond it, and prone to sitting inside an unrelated neighboring root's
   // territory since nothing pushed it clear of that shared center to begin with.
-  test('a root with a deep subtree seeds much farther from the shared hub than a childless root', () => {
+  // 2026-10-25 redesign: galaxies (one per root, lone nodes included) are packed by their system
+  // circles, so independent galaxies never overlap — the property the old subtreeReach root ring
+  // and group-separation pass approximated.
+  test('independent galaxies never overlap, whatever their depth', () => {
     const nodes: GalaxyLayoutNode[] = [node('lonelyRoot')]
     const edges: GalaxyLayoutEdge[] = []
-    // A 4-level chain under its own root — same shape as organism -> eukaryote -> cell -> nucleus.
     const chain = ['deepRoot', 'a', 'b', 'c', 'd']
     for (const id of chain) nodes.push(node(id))
     for (let i = 0; i < chain.length - 1; i++) edges.push(structuralEdge(chain[i], chain[i + 1]))
 
     const positions = galaxyLayout(nodes, edges)
-    const lonelyDist = Math.hypot(positions.get('lonelyRoot')!.x, positions.get('lonelyRoot')!.y)
-    const deepDist = Math.hypot(positions.get('deepRoot')!.x, positions.get('deepRoot')!.y)
-
-    expect(deepDist).toBeGreaterThan(lonelyDist * 3)
-  })
-
-  test('separateGroups (default true) keeps top-level group boundary circles from overlapping each other', () => {
-    const { nodes, edges } = busyMultiRootNodes()
-
-    const withoutSeparation = galaxyLayout(nodes, edges, { separateGroups: false })
-    const withSeparation = galaxyLayout(nodes, edges)
-
-    // Sanity-check the fixture actually reproduces the bug being fixed — if this ever stops
-    // being true (e.g. after an unrelated tuning change), the dataset needs to get busier rather
-    // than the assertion below silently passing for the wrong reason.
-    expect(worstGroupOverlap(groupBoundaries(nodes, edges, withoutSeparation))).toBeGreaterThan(0)
-
-    expect(worstGroupOverlap(groupBoundaries(nodes, edges, withSeparation))).toBeLessThanOrEqual(0)
-  })
-
-  test('separateGroups: false reproduces the un-separated positions exactly', () => {
-    const { nodes, edges } = busyMultiRootNodes()
-
-    const a = galaxyLayout(nodes, edges, { separateGroups: false })
-    const b = galaxyLayout(nodes, edges, { separateGroups: false })
-
-    for (const n of nodes) {
-      expect(a.get(n.id)).toEqual(b.get(n.id))
+    const lone = positions.get('lonelyRoot')!
+    for (const id of chain) {
+      const p = positions.get(id)!
+      expect(Math.abs(p.x - lone.x) >= 100 || Math.abs(p.y - lone.y) >= 40).toBe(true)
     }
   })
-
+  test('galaxies in a busy forest never overlap (packed by system circles)', () => {
+    const { nodes, edges } = busyMultiRootNodes()
+    const positions = galaxyLayout(nodes, edges)
+    expect(worstGroupOverlap(groupBoundaries(nodes, edges, positions))).toBeLessThan(1e-6)
+  })
+  test('the layout is deterministic', () => {
+    const { nodes, edges } = busyMultiRootNodes()
+    const a = galaxyLayout(nodes, edges)
+    const b = galaxyLayout(nodes, edges)
+    for (const n of nodes) expect(a.get(n.id)).toEqual(b.get(n.id))
+  })
   test('a root with exactly one child stays in that child\'s group — delegating headship to a single child would orphan the root from every group', () => {
     // galaxyGroupHeads() itself first: a root with >1 children delegates headship to each of
     // them, but one with 0 or exactly 1 child does not — the single-child case has to be treated
@@ -335,7 +338,9 @@ test.describe('galaxySimulationStep', () => {
     // Many ticks' worth of an idle live session — nothing pinned, nothing dragging.
     for (let i = 0; i < 120; i++) pos = galaxySimulationStep(nodes, edges, pos)
 
-    expect(worstGroupOverlap(groupBoundaries(nodes, edges, pos!))).toBeLessThanOrEqual(0)
+    // < 1e-6, not <= 0: galaxies left exactly touching measure ~1e-13 of cos/sin noise (same
+    // tolerance as the elliptical-warp composition test below).
+    expect(worstGroupOverlap(groupBoundaries(nodes, edges, pos!))).toBeLessThan(1e-6)
   })
 
   test('separateGroups: false opts the per-tick home out of group separation too', () => {
@@ -364,13 +369,10 @@ test.describe('galaxySimulationStep', () => {
   // a node into another group" even though membership never changed. The correct reaction is
   // collision avoidance, same as individual nodes already get: the other group's real nodes move
   // out of the way.
-  test('dragging one group into another\'s territory pushes the other group away, not just its boundary circle', () => {
+  // 2026-10-25: a dragged node carries its subtree; overlaps a held drag causes are resolved on the
+  // live simulation's TARGET, so the simulation settles instead of fighting itself every frame.
+  test('a held drag carries its subtree, settles, and leaves no overlap', () => {
     const nodes: GalaxyLayoutNode[] = [
-      // rootA/rootB each need a SECOND child (dummyA/dummyB) so galaxyGroupHeads actually
-      // delegates their headship down to sunA/sunB — a root with only one child (just sunA/sunB
-      // alone) now stays its own group head instead (see galaxyGroupHeads' own docs), which would
-      // make rootA/rootB the group anchor instead of sunA/sunB and defeat the point of this
-      // fixture. dummyA/dummyB otherwise play no role in the assertions below.
       node('rootA'), node('dummyA'), node('sunA'), node('a1'), node('a2'), node('a3'),
       node('rootB'), node('dummyB'), node('sunB'), node('b1'), node('b2'), node('b3'),
     ]
@@ -380,25 +382,29 @@ test.describe('galaxySimulationStep', () => {
       structuralEdge('rootB', 'dummyB'), structuralEdge('rootB', 'sunB'),
       structuralEdge('sunB', 'b1'), structuralEdge('sunB', 'b2'), structuralEdge('sunB', 'b3'),
     ]
-
     const settled = galaxyLayout(nodes, edges)
     const sunB = settled.get('sunB')!
-    const bBefore = ['b1', 'b2', 'b3'].map(id => settled.get(id)!)
+    const a1Offset = { x: settled.get('a1')!.x - settled.get('sunA')!.x, y: settled.get('a1')!.y - settled.get('sunA')!.y }
 
-    // Live-drag sunA (with its own subtree cascading along, per place()'s pin-cascade) right on
-    // top of sunB's group.
-    const draggedNodes = nodes.map(n => (n.id === 'sunA' ? { ...n, pinned: true, x: sunB.x, y: sunB.y } : n))
-    let pos: Map<string, { x: number; y: number }> | undefined = new Map(settled)
-    for (let i = 0; i < 60; i++) pos = galaxySimulationStep(draggedNodes, edges, pos)
-
-    const boundaries = groupBoundaries(draggedNodes, edges, pos!)
-    expect(worstGroupOverlap(boundaries)).toBeLessThanOrEqual(0)
-
-    // sunB's group was never touched directly — the only way its members end up somewhere new is
-    // if the reactive push-away actually moved them.
-    const bAfter = ['b1', 'b2', 'b3'].map(id => pos!.get(id)!)
-    for (let i = 0; i < 3; i++) {
-      expect(Math.hypot(bAfter[i].x - bBefore[i].x, bAfter[i].y - bBefore[i].y)).toBeGreaterThan(10)
+    const dragged = nodes.map(n => (n.id === 'sunA' ? { ...n, pinned: true, x: sunB.x, y: sunB.y } : n))
+    let pos: Map<string, { x: number; y: number }> = new Map(settled)
+    let lastMove = Infinity
+    for (let i = 0; i < 200; i++) {
+      const next = galaxySimulationStep(dragged, edges, pos)
+      lastMove = Math.max(...nodes.map(n => Math.hypot(next.get(n.id)!.x - pos.get(n.id)!.x, next.get(n.id)!.y - pos.get(n.id)!.y)))
+      pos = next
+    }
+    expect(lastMove).toBeLessThan(0.15)
+    expect(pos.get('sunA')).toEqual({ x: sunB.x, y: sunB.y })
+    // a1 kept its place relative to its (dragged) parent, give or take overlap resolution.
+    expect(Math.hypot(pos.get('a1')!.x - pos.get('sunA')!.x - a1Offset.x, pos.get('a1')!.y - pos.get('sunA')!.y - a1Offset.y)).toBeLessThan(80)
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const p = pos.get(nodes[i].id)!, q = pos.get(nodes[j].id)!
+        const ox = (nodes[i].width + nodes[j].width) / 2 - Math.abs(p.x - q.x)
+        const oy = (nodes[i].height + nodes[j].height) / 2 - Math.abs(p.y - q.y)
+        expect(ox > 0.5 && oy > 0.5).toBe(false)
+      }
     }
   })
 })
@@ -444,8 +450,17 @@ test.describe('aspectRatio (elliptical warp)', () => {
     }
   })
 
-  test('a wide aspectRatio produces a measurably wider-than-tall bounding box', () => {
+  test('a single galaxy is never squashed to fit a wide aspectRatio — its orbits stay round', () => {
     const { nodes, edges } = branchyTree()
+
+    const natural = boundingBoxSize(galaxyLayout(nodes, edges))
+    const wide = boundingBoxSize(galaxyLayout(nodes, edges, { aspectRatio: 4 }))
+
+    expect(wide.width / wide.height).toBeCloseTo(natural.width / natural.height, 1)
+  })
+
+  test('a wide aspectRatio spreads a forest\'s galaxies into a measurably wider-than-tall arrangement', () => {
+    const { nodes, edges } = busyMultiRootNodes()
 
     const circular = boundingBoxSize(galaxyLayout(nodes, edges))
     const wide = boundingBoxSize(galaxyLayout(nodes, edges, { aspectRatio: 4 }))
@@ -487,7 +502,7 @@ test.describe('aspectRatio (elliptical warp)', () => {
     expect(scale).toEqual({ x: 1, y: 1 })
   })
 
-  test('formula: warped x-offset equals the natural x-offset scaled by resolveAspectRatioScale\'s own result', () => {
+  test('formula: the warp scales the root-ring offset by resolveAspectRatioScale\'s result and leaves orbits unwarped', () => {
     // startAngle: 0 isolates cos(0)=1, sin(0)=0 for the root-ring seed itself (a single root, so
     // its own placement IS the root-ring seed with i=0, n=1 -> angle = startAngle exactly), which
     // in turn keeps the single child's own angle at 0 too (n=1 kids, no parity offset at depth 0).
@@ -510,8 +525,10 @@ test.describe('aspectRatio (elliptical warp)', () => {
     const root = warped.get('root')!
     const child = warped.get('child')!
 
+    // The root's own seed on the root ring is warped; its satellite's orbit around it is not.
     expect(root.y).toBeCloseTo(0, 5)
-    expect(child.x - root.x).toBeCloseTo(naturalXOffset * scale.x, 5)
+    expect(root.x).toBeCloseTo(natural.get('root')!.x * scale.x, 5)
+    expect(child.x - root.x).toBeCloseTo(naturalXOffset, 5)
     expect(child.y - root.y).toBeCloseTo(0, 5)
   })
 
@@ -526,28 +543,11 @@ test.describe('aspectRatio (elliptical warp)', () => {
     expect(positions.get('pinned')).toEqual({ x: 500, y: 500 })
   })
 
-  test('composes with subtreeReach — a deep subtree still seeds farther from the hub than a childless root', () => {
-    const nodes: GalaxyLayoutNode[] = [node('lonelyRoot')]
-    const edges: GalaxyLayoutEdge[] = []
-    const chain = ['deepRoot', 'a', 'b', 'c', 'd']
-    for (const id of chain) nodes.push(node(id))
-    for (let i = 0; i < chain.length - 1; i++) edges.push(structuralEdge(chain[i], chain[i + 1]))
-
-    // startAngle: 0 puts both 2-root-ring roots on the x-axis (angles 0 and π), so an elliptical
-    // warp scales both root positions by the same x-axis factor — isolating the property under
-    // test (subtreeReach still composes with aspectRatio) from the unrelated fact that an
-    // elliptical warp scales differently-angled points by different amounts. separateGroups: false
-    // isolates it further from shiftGroupsApart's own group-vs-group macro pass, which treats
-    // group boundary circles as literally circular regardless of aspectRatio (a known, documented,
-    // separately-tested limitation — see "composes with separateGroups" below — not something this
-    // test is trying to verify).
-    const positions = galaxyLayout(nodes, edges, { aspectRatio: 3, startAngle: 0, separateGroups: false })
-    const lonelyDist = Math.hypot(positions.get('lonelyRoot')!.x, positions.get('lonelyRoot')!.y)
-    const deepDist = Math.hypot(positions.get('deepRoot')!.x, positions.get('deepRoot')!.y)
-
-    expect(deepDist).toBeGreaterThan(lonelyDist * 3)
+  test('leaning a forest wide never makes galaxies overlap', () => {
+    const { nodes, edges } = busyMultiRootNodes()
+    const positions = galaxyLayout(nodes, edges, { aspectRatio: 4 })
+    expect(worstGroupOverlap(groupBoundaries(nodes, edges, positions))).toBeLessThan(1e-6)
   })
-
   test('composes with separateGroups — group boundaries stay non-overlapping under an elliptical warp', () => {
     const { nodes, edges } = busyMultiRootNodes()
 

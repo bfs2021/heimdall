@@ -163,3 +163,75 @@ body.dark-canvas .graph-node__kind {
   font-family: var(--font-mono, monospace);
 }
 
+
+/* Round body variant (bodyRadius) — galaxy's default node: area encodes weight. Width/height are
+   set inline from the radius; border-box keeps the measured size exactly 2r so galaxyLayout's
+   orbit math sees the true radius. */
+.graph-node--body {
+  /* display: flex (block-level), not the card's inline-flex — GraphCanvas measures each node inside
+     an inline-block wrapper, and an inline-level body sits in a line box whose height is the
+     font's line height: a 16px body measured 16x21 and was drawn off-centre in a taller box. */
+  display: flex;
+  box-sizing: border-box;
+  position: relative;
+  justify-content: center;
+  padding: 0;
+  border-radius: 50%;
+  overflow: visible;
+  background: rgb(var(--dom-default) / 0.16);
+  border-color: rgb(var(--dom-default) / 0.7);
+}
+
+.graph-node--body[data-domain='life'] {
+  background: rgb(var(--dom-life) / 0.16);
+  border-color: rgb(var(--dom-life) / 0.7);
+}
+
+.graph-node--body[data-domain='climate'] {
+  background: rgb(var(--dom-climate) / 0.16);
+  border-color: rgb(var(--dom-climate) / 0.7);
+}
+
+.graph-node--body[data-domain='software'] {
+  background: rgb(var(--dom-software) / 0.16);
+  border-color: rgb(var(--dom-software) / 0.7);
+}
+
+.graph-node--body .graph-node__swatch,
+.graph-node--body .graph-node__kind {
+  display: none;
+}
+
+.graph-node--body .graph-node__label {
+  /* Up to two centred lines across the body's width, instead of one line cut to a few
+     characters ("Op…", "Mi…" on the budget data). */
+  flex: none;
+  max-width: 88%;
+  font-size: 11px;
+  line-height: 1.15;
+  text-align: center;
+  white-space: normal;
+  /* Break only between words: mid-word breaks read as "Medica / re". */
+  overflow-wrap: normal;
+  word-break: normal;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+/* Too small to hold a label: keep it for assistive tech, hide it visually (title shows it). */
+.graph-node--body-unlabeled .graph-node__label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.graph-node--body .graph-node__collapse-toggle {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+}
