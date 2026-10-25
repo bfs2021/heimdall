@@ -348,4 +348,158 @@ describe('radialTreeLayout', () => {
       expect(result.trunkBoundaries.size).toBe(2) // 'root' trunk and 'other' trunk
     })
   })
+
+  // Default measured card size in GraphCanvas.
+  const CARD = { width: 138, height: 30 }
+
+  // A tree with `fanout` children per node down to `depth` levels below the root.
+  const buildTree = (fanout: number, depth: number) => {
+    const ids = ['n']
+    const edges: HierarchyEdge[] = []
+    let frontier = ['n']
+    for (let d = 0; d < depth; d++) {
+      const next: string[] = []
+      for (const parent of frontier) {
+        for (let i = 0; i < fanout; i++) {
+          const id = `${parent}.${i}`
+          ids.push(id)
+          edges.push({ source: parent, target: id, structural: true })
+          next.push(id)
+        }
+      }
+      frontier = next
+    }
+    const nodes: LayoutNode[] = ids.map(id => ({ id, x: 0, y: 0, ...CARD }))
+    return { ids, nodes, edges, dims: mockDims(nodes), forest: buildStructuralForest(ids, edges) }
+  }
+
+  const countOverlaps = (
+    positions: Map<string, { x: number; y: number }>,
+    size = CARD,
+  ): number => {
+    const boxes = [...positions.values()].map(p => ({ ...p, ...size }))
+    let n = 0
+    for (let i = 0; i < boxes.length; i++) {
+      for (let j = i + 1; j < boxes.length; j++) {
+        if (boxesOverlap(boxes[i], boxes[j])) n++
+      }
+    }
+    return n
+  }
+
+  // On-screen node height when the layout is fit into a 1280x800 viewport.
+  const fitToViewNodeHeight = (positions: Map<string, { x: number; y: number }>): number => {
+    const pts = [...positions.values()]
+    const w = Math.max(...pts.map(p => p.x)) - Math.min(...pts.map(p => p.x)) + CARD.width
+    const h = Math.max(...pts.map(p => p.y)) - Math.min(...pts.map(p => p.y)) + CARD.height
+    return CARD.height * Math.min(1, 1280 / w, 800 / h)
+  }
+
+  describe('ring sizing', () => {
+    it('sizes rings from their own population, keeping a ~30-node tree legible at fit-to-view', () => {
+      // Regression: maxRadius = nodeCount * ringSpacing made a 31-node tree ~5000px wide, so
+      // fit-to-view rendered 30px nodes at under 5px.
+      const { nodes, edges, dims, forest } = buildTree(5, 2) // 31 nodes
+      const { positions } = radialTreeLayout(nodes, edges, dims, forest)
+
+      expect(fitToViewNodeHeight(positions)).toBeGreaterThanOrEqual(12)
+      expect(countOverlaps(positions)).toBe(0)
+    })
+
+    it('does not overlap nodes along a chain', () => {
+      // Regression: ring spacing was maxRadius / maxDepth (~89px for a 10-node chain), narrower
+      // than a 138px card, so every parent/child pair overlapped.
+      const { nodes, edges, dims, forest } = buildTree(1, 9)
+      const { positions } = radialTreeLayout(nodes, edges, dims, forest)
+
+      expect(countOverlaps(positions)).toBe(0)
+    })
+
+    it('keeps adjacent rings at least ringSpacing apart beyond the node boxes', () => {
+      const { nodes, edges, dims, forest } = buildTree(3, 3)
+      const { ringGeometry } = radialTreeLayout(nodes, edges, dims, forest, { ringSpacing: 80 })
+      const radii = ringGeometry.map(r => r.r).sort((a, b) => a - b)
+      const diagonal = Math.hypot(CARD.width, CARD.height)
+
+      expect(radii[0]).toBeGreaterThanOrEqual(diagonal + 80 - 1e-6)
+      for (let i = 1; i < radii.length; i++) {
+        expect(radii[i] - radii[i - 1]).toBeGreaterThanOrEqual(diagonal + 80 - 1e-6)
+      }
+    })
+
+    it('keeps every node of a depth on one ring around the root', () => {
+      const { ids, nodes, edges, dims, forest } = buildTree(4, 3)
+      const { positions } = radialTreeLayout(nodes, edges, dims, forest)
+      const root = positions.get('n')!
+      const byDepth = new Map<number, number[]>()
+      for (const id of ids) {
+        const depth = id.split('.').length - 1
+        const list = byDepth.get(depth) ?? []
+        list.push(distance(root, positions.get(id)!))
+        byDepth.set(depth, list)
+      }
+      for (const dists of byDepth.values()) {
+        expect(Math.max(...dists) - Math.min(...dists)).toBeLessThan(1e-6)
+      }
+    })
+  })
+
+  describe('collapse stability', () => {
+    it('does not move any visible node when a subtree is collapsed', () => {
+      // Regression: the placement pass re-derived ring radii from the visible subset, so
+      // collapsing one subtree moved nearly every other node.
+      const { nodes, edges, dims, forest } = buildTree(3, 3)
+      const expanded = radialTreeLayout(nodes, edges, dims, forest).positions
+
+      const hidden = new Set(nodes.map(n => n.id).filter(id => id.startsWith('n.0.')))
+      const visible = nodes.filter(n => !hidden.has(n.id))
+      // Collapsed descendants are never measured, so they're missing from dims too.
+      const visibleDims = new Map([...dims].filter(([id]) => !hidden.has(id)))
+      const collapsed = radialTreeLayout(visible, edges, visibleDims, forest).positions
+
+      expect(collapsed.size).toBe(visible.length)
+      for (const node of visible) {
+        expect(collapsed.get(node.id)).toEqual(expanded.get(node.id))
+      }
+    })
+
+    it('sizes unmeasured (hidden) nodes like the largest measured node', () => {
+      const { nodes, edges, dims, forest } = buildTree(3, 2)
+      const full = radialTreeLayout(nodes, edges, dims, forest)
+
+      // Only the root measured: the rest are sized from it, giving the same layout.
+      const rootOnly = new Map([['n', dims.get('n')!]])
+      const partial = radialTreeLayout(nodes, edges, rootOnly, forest)
+
+      expect(partial.positions).toEqual(full.positions)
+    })
+  })
+
+  describe('trunk boundaries', () => {
+    it('does not overlap boundaries of packed trunks', () => {
+      // Regression: boundaries were recomputed with each node's half-diagonal (~70px for a
+      // 138x30 card) after packing with only 6px of slack, so neighbors' circles overlapped.
+      const parts = [buildTree(2, 2), buildTree(1, 3), buildTree(3, 1), buildTree(1, 1)]
+      const ids: string[] = []
+      const edges: HierarchyEdge[] = []
+      parts.forEach((p, i) => {
+        ids.push(...p.ids.map(id => `t${i}:${id}`))
+        edges.push(...p.edges.map(e => ({ ...e, source: `t${i}:${e.source}`, target: `t${i}:${e.target}` })))
+      })
+      for (let i = 0; i < 4; i++) ids.push(`solo${i}`)
+      const nodes: LayoutNode[] = ids.map(id => ({ id, x: 0, y: 0, ...CARD }))
+      const forest = buildStructuralForest(ids, edges)
+      const { positions, trunkBoundaries } = radialTreeLayout(nodes, edges, mockDims(nodes), forest)
+
+      expect(countOverlaps(positions)).toBe(0)
+      const circles = [...trunkBoundaries.values()]
+      expect(circles.length).toBe(8)
+      for (let i = 0; i < circles.length; i++) {
+        for (let j = i + 1; j < circles.length; j++) {
+          const gap = distance(circles[i], circles[j]) - circles[i].r - circles[j].r
+          expect(gap).toBeGreaterThan(-1e-6)
+        }
+      }
+    })
+  })
 })
