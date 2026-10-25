@@ -23,6 +23,7 @@ import PagePatternsShowcase from './test-pages/PagePatternsShowcase'
 import ChatShowcase from './test-pages/ChatShowcase'
 import FormsShowcase from './test-pages/FormsShowcase'
 import GraphShowcase from './test-pages/GraphShowcase'
+import OrganicLayoutTestPage from './test-pages/OrganicLayoutTestPage'
 import GalaxyLayoutLab from './test-pages/GalaxyLayoutLab'
 import CenterOnSelectTestPage from './test-pages/CenterOnSelectTestPage'
 import FullscreenContainerRefTestPage from './test-pages/FullscreenContainerRefTestPage'
@@ -125,6 +126,10 @@ export default function App() {
 
   if (exampleParam === 'galaxy-layout-lab') {
     return <GalaxyLayoutLab />
+  }
+
+  if (exampleParam === 'organic-layout') {
+    return <OrganicLayoutTestPage />
   }
 
   if (exampleParam === 'center-on-select') {

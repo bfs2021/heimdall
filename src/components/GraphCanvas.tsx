@@ -21,6 +21,7 @@ import {
   forceLayout,
   clusteredForceLayout,
 } from "../utils/graphLayout";
+import { organicLayout } from "../utils/organicLayout";
 import {
   galaxyLayout,
   galaxyEffectiveWeights,
@@ -598,7 +599,7 @@ export interface GraphCanvasProps extends Omit<
    *  their parent pages (see isPageNode). 'radial-tree' arranges each structural tree as a
    *  centered radial hierarchy with descendants on depth rings, and multiple trunks packed without
    *  overlap. */
-  layout?: "manual" | "force" | "galaxy" | "force-clustered" | "ux-navigation" | "radial-tree";
+  layout?: "manual" | "force" | "organic" | "galaxy" | "force-clustered" | "ux-navigation" | "radial-tree";
   /**
    * layout="force" | "galaxy". Extra breathing room kept clear around each node's own footprint,
    * on top of what's needed to just avoid overlap — this is what leaves room for an edge to be
@@ -1242,10 +1243,11 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
       setDims(next);
     }, [visibleNodes, renderNode, galaxyRadii]);
 
-    // Run the engine layout when dims are ready (only for layout='force' | 'galaxy' | 'force-clustered' | 'ux-navigation' | 'radial-tree')
+    // Run the engine layout when dims are ready (only for layout='force' | 'organic' | 'galaxy' | 'force-clustered' | 'ux-navigation' | 'radial-tree')
     useEffect(() => {
       if (
         (layout !== "force" &&
+          layout !== "organic" &&
           layout !== "galaxy" &&
           layout !== "force-clustered" &&
           layout !== "ux-navigation" &&
@@ -1278,6 +1280,29 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
         setComputedPositions(
           forceLayout(layoutNodes, layoutEdges, { nodeMargin }),
         );
+        setClusterBoundaries(new Map());
+        setRingGeometry([]);
+      } else if (layout === "organic") {
+        const layoutEdges = (edges ?? []).map((e) => ({
+          source: e.sourceId,
+          target: e.targetId,
+        }));
+        // organicLayout reads node x/y as a sketch only when every node has coordinates and the
+        // layout already honors its post-conditions; nodes without explicit coordinates get NaN
+        // (not the circle seed above) so a first render is always a cold, MDS-seeded solve, and a
+        // node the caller positioned is pinned.
+        const organicNodes = visibleNodes.map((n) => ({
+          id: n.id,
+          x: n.x ?? NaN,
+          y: n.y ?? NaN,
+          width: dims.get(n.id)?.width ?? DEFAULT_NODE_W,
+          height: dims.get(n.id)?.height ?? DEFAULT_NODE_H,
+          pinned: n.x !== undefined && n.y !== undefined,
+        }));
+        const { positions } = organicLayout(organicNodes, layoutEdges, {
+          minimumNodeDistance: nodeMargin,
+        });
+        setComputedPositions(positions);
         setClusterBoundaries(new Map());
         setRingGeometry([]);
       } else if (layout === "force-clustered") {
@@ -1571,12 +1596,13 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
       if (didCenterRef.current) return;
       if (!containerSize || dims.size === 0 || visibleNodes.length === 0)
         return;
-      // 'manual' has no engine layout to wait on. 'force'/'galaxy'/'force-clustered'/'ux-navigation'/'radial-tree'
+      // 'manual' has no engine layout to wait on. 'force'/'organic'/'galaxy'/'force-clustered'/'ux-navigation'/'radial-tree'
       // all compute positions asynchronously (see the engine-layout effect above) — without waiting
       // for them here too, this could run with computedPositions still empty, every node falling
       // back to {x:0,y:0}, and fit/center on that degenerate single-point box instead of the real layout.
       if (
         (layout === "force" ||
+          layout === "organic" ||
           layout === "galaxy" ||
           layout === "force-clustered" ||
           layout === "ux-navigation" ||
