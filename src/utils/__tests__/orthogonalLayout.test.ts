@@ -140,6 +140,91 @@ describe('orthogonalLayout', () => {
     expect(throughNode(nodes, edges, positions, routes, 10)).toBe(0)
   })
 
+  it('layers by the structural forest when edges are flagged, with relational edges never moving a node up', () => {
+    const ids = ['root', 'a', 'b', 'a1', 'b1']
+    const edges = [
+      { source: 'root', target: 'a', structural: true }, { source: 'root', target: 'b', structural: true },
+      { source: 'a', target: 'a1', structural: true }, { source: 'b', target: 'b1', structural: true },
+      { source: 'a1', target: 'root' }, // relational back-edge
+    ]
+    const { positions, cell } = orthogonalLayout(nodesOf(ids), edges)
+    const rowOf = (id: string) => Math.round(positions.get(id)!.y / cell.h)
+    expect(rowOf('root')).toBe(0)
+    expect(rowOf('a')).toBe(1); expect(rowOf('b')).toBe(1)
+    expect(rowOf('a1')).toBe(2); expect(rowOf('b1')).toBe(2)
+  })
+
+  it('fans a page\'s views to its right in the same row (ux-navigation shape)', () => {
+    const ids = ['home', 'settings', 'v_table', 'v_chart', 'v_form']
+    const edges = [
+      { source: 'home', target: 'settings', structural: true },
+      { source: 'home', target: 'v_table', structural: true }, { source: 'home', target: 'v_chart', structural: true },
+      { source: 'settings', target: 'v_form', structural: true },
+    ]
+    const { positions, cell, routes, stats } = orthogonalLayout(nodesOf(ids), edges, { isPageNode: id => !id.startsWith('v_') })
+    const cellOf = (id: string) => ({ c: Math.round(positions.get(id)!.x / cell.w), r: Math.round(positions.get(id)!.y / cell.h) })
+    expect(cellOf('v_table')).toEqual({ c: cellOf('home').c + 1, r: cellOf('home').r })
+    expect(cellOf('v_chart')).toEqual({ c: cellOf('home').c + 2, r: cellOf('home').r })
+    expect(cellOf('v_form')).toEqual({ c: cellOf('settings').c + 1, r: cellOf('settings').r })
+    expect(cellOf('settings').r).toBe(cellOf('home').r + 1)
+    expect(stats.fallbackRoutes).toBe(0)
+    expect(sharedSegments(routes)).toBe(0)
+    expect(boxOverlaps(nodesOf(ids), positions)).toBe(0)
+  })
+
+  it('routes navigation routes last and keeps them clear of nodes and other routes', () => {
+    const { nodes, edges } = tree()
+    const withNav = [...edges, { source: 'a1', target: 'c3', navigationRoute: true }, { source: 'c1', target: 'root', navigationRoute: true }]
+    const { positions, routes, stats } = orthogonalLayout(nodes, withNav)
+    expect(stats.fallbackRoutes).toBe(0)
+    expect(throughNode(nodes, withNav, positions, routes, 10)).toBe(0)
+    expect(sharedSegments(routes)).toBe(0)
+  })
+
+  it('holds a pinned node exactly on its pin and keeps every anchor on the grid', () => {
+    const ids = ['p', 'q', 'r', 's']
+    const nodes = nodesOf(ids).map(n => (n.id === 'q' ? { ...n, x: 505, y: -301, pinned: true } : { ...n, x: NaN, y: NaN }))
+    const { positions, cell, origin, stats } = orthogonalLayout(nodes, chain(ids))
+    expect(stats.pinnedNodes).toBe(1)
+    expect(positions.get('q')).toEqual({ x: 505, y: -301 })
+    for (const p of positions.values()) {
+      expect(Math.abs((p.x - origin.x) / cell.w - Math.round((p.x - origin.x) / cell.w))).toBeLessThan(1e-9)
+      expect(Math.abs((p.y - origin.y) / cell.h - Math.round((p.y - origin.y) / cell.h))).toBeLessThan(1e-9)
+    }
+    expect(boxOverlaps(nodes, positions)).toBe(0)
+  })
+
+  it('keeps every cell when re-run on its own output, and places a new node near its neighbors', () => {
+    const { nodes, edges } = tree()
+    const first = orthogonalLayout(nodes.map(n => ({ ...n, x: NaN, y: NaN })), edges)
+    expect(first.stats.sketch).toBe(false)
+    const sketchNodes = nodes.map(n => ({ ...n, ...first.positions.get(n.id)! }))
+    const second = orthogonalLayout(sketchNodes, edges)
+    expect(second.stats.sketch).toBe(true)
+    for (const [id, p] of first.positions) expect(second.positions.get(id)).toEqual(p)
+    const grown = [...sketchNodes, { id: 'new', x: NaN, y: NaN, width: W, height: H }]
+    const third = orthogonalLayout(grown, [...edges, { source: 'c2', target: 'new' }])
+    expect(third.stats.sketch).toBe(true)
+    for (const [id, p] of first.positions) expect(third.positions.get(id)).toEqual(p)
+    const c2 = third.positions.get('c2')!, nw = third.positions.get('new')!
+    expect(Math.abs(nw.x - c2.x) + Math.abs(nw.y - c2.y)).toBeLessThanOrEqual(2 * Math.max(third.cell.w, third.cell.h))
+    expect(boxOverlaps(grown, third.positions)).toBe(0)
+  })
+
+  it('shares one trunk per parent with busTreeEdges and reports the groups', () => {
+    const ids = ['p', 'c1', 'c2', 'c3', 'c4']
+    const edges = ['c1', 'c2', 'c3', 'c4'].map(c => ({ source: 'p', target: c, structural: true }))
+    const off = orthogonalLayout(nodesOf(ids), edges)
+    const on = orthogonalLayout(nodesOf(ids), edges, { busTreeEdges: true })
+    expect(off.groups.every(g => g === undefined)).toBe(true)
+    expect(on.stats.busEdges).toBe(4)
+    expect(new Set(on.groups).size).toBe(1)
+    expect(sharedSegments(off.routes)).toBe(0)
+    // Only members of one group may share; here every edge is in the group, so sharing is allowed.
+    expect(sharedSegments(on.routes)).toBeGreaterThan(0)
+    expect(throughNode(nodesOf(ids), edges, on.positions, on.routes, 10)).toBe(0)
+  })
+
   it('handles the empty graph and a single node', () => {
     expect(orthogonalLayout([], []).routes).toEqual([])
     const one = orthogonalLayout(nodesOf(['solo']), [])

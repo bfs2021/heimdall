@@ -1327,16 +1327,30 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
         const engineEdges = (edges ?? []).filter(
           (e) => visibleIds.has(e.sourceId) && visibleIds.has(e.targetId),
         );
+        // Nodes without explicit coordinates get NaN so a first render is a cold grid placement;
+        // explicit coordinates pin the node to the cell under them. Structural / navigation-route
+        // classification flows through the same callbacks ux-navigation uses, so a page/view graph
+        // lays out as a page tree with view fans (isPageNode) and user-flow routes route last.
         const orthogonalNodes = visibleNodes.map((n) => ({
           id: n.id,
-          x: n.x ?? 0,
-          y: n.y ?? 0,
+          x: n.x ?? NaN,
+          y: n.y ?? NaN,
           width: dims.get(n.id)?.width ?? DEFAULT_NODE_W,
           height: dims.get(n.id)?.height ?? DEFAULT_NODE_H,
+          pinned: n.x !== undefined && n.y !== undefined,
         }));
+        const nodeById = new Map(nodes.map((n) => [n.id, n]));
         const { positions, routes } = orthogonalLayout(
           orthogonalNodes,
-          engineEdges.map((e) => ({ source: e.sourceId, target: e.targetId })),
+          engineEdges.map((e) => ({
+            source: e.sourceId,
+            target: e.targetId,
+            structural: isStructuralEdge ? safeIsStructuralEdge(isStructuralEdge, e, layout) : undefined,
+            navigationRoute: isNavigationRoute ? safeIsNavigationRoute(isNavigationRoute, e) : undefined,
+          })),
+          isPageNode
+            ? { isPageNode: (id) => { const full = nodeById.get(id); return full ? safeIsPageNode(isPageNode, full) : true; } }
+            : {},
         );
         const routed = new Map<string, RoutedEdge>();
         engineEdges.forEach((e, i) => {
@@ -1429,6 +1443,7 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
       nodeMargin,
       isStructuralEdge,
       isPageNode,
+      isNavigationRoute,
       forest,
       nodes,
       collapsedNodeIds,

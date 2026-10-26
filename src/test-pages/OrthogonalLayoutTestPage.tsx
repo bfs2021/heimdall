@@ -25,6 +25,16 @@ link(IDS.home, IDS.table); link(IDS.home, IDS.chart); link(IDS.settings, IDS.for
 link(IDS.billing, IDS.modal); link(IDS.app, IDS.toast)
 link(IDS.store, IDS.api); link(IDS.api, IDS.cache); link(IDS.cache, IDS.api, 'invalidates')
 link(IDS.auth, IDS.api); link(IDS.table, IDS.store, 'reads'); link(IDS.telemetry, IDS.api); link(IDS.app, IDS.telemetry)
+// User-flow routes between pages (navigation routes): routed last, around everything else.
+link(IDS.home, IDS.settings, 'go to settings'); link(IDS.billing, IDS.home, 'back home')
+const NAV_IDS = new Set(EDGES.slice(-2).map((e) => e.id))
+// Containment: app → services and pages, router → pages, pages → views. Everything else is relational.
+const STRUCTURAL = new Set(EDGES.filter((e) => {
+  const t = e.targetId
+  return (e.sourceId === IDS.app && (t === IDS.router || t === IDS.store || t === IDS.auth || t === IDS.telemetry || t === IDS.toast)) ||
+    (e.sourceId === IDS.router && t.startsWith('page_')) ||
+    (e.sourceId.startsWith('page_') && t.startsWith('view_'))
+}).map((e) => e.id))
 
 export default function OrthogonalLayoutTestPage() {
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined)
@@ -34,7 +44,7 @@ export default function OrthogonalLayoutTestPage() {
         data-testid="orthogonal-layout-caption"
         style={{ padding: '8px 12px', fontSize: 12, borderBottom: '1px solid var(--canvas-border, #d8dde5)' }}
       >
-        layout=&quot;orthogonal&quot; · {NODES.length} nodes · {EDGES.length} edges · grid placement + lattice-routed polylines
+        layout=&quot;orthogonal&quot; · {NODES.length} nodes · {EDGES.length} edges · page tree with view fans, relational edges, 2 navigation routes
       </div>
       <GraphCanvas
         data-testid="orthogonal-canvas"
@@ -45,6 +55,10 @@ export default function OrthogonalLayoutTestPage() {
         fitPadding={40}
         selectedNodeId={selectedId}
         onNodeSelect={setSelectedId}
+        isStructuralEdge={(e) => STRUCTURAL.has(e.id)}
+        isNavigationRoute={(e) => NAV_IDS.has(e.id)}
+        isPageNode={(n) => !n.id.startsWith('view_')}
+        showAllRelations
         style={{ flex: 1, minHeight: 0 }}
       />
     </div>
