@@ -106,6 +106,10 @@ const GROW_CAP = 50
 // Cold solves nudge boxes off third-party labels (best effort) only this many passes, so the
 // remaining passes are the plain hard-constraint loop that is known to converge.
 const NUDGE_PASSES = 25
+// A star's leaves share one ring while the ring at the spoke length can hold them with room to
+// spare (up to four times its capacity, the overlap stage absorbs the rest); past that the leaves form
+// a halo: grid cells around the hub, filled by elliptical distance so the halo has the view's shape.
+const HALO_OVERFLOW = 4
 
 // ─── deterministic per-id helpers ────────────────────────────────────────────
 
@@ -382,10 +386,24 @@ function buildComponentSolver(
   // Stage 1 gate's 0.132; the cap only matters for k <= 6 anyway.
   // A star whose spokes carry preferred lengths (edge labels) puts its leaves on a ring of that
   // radius, so the leaves spread with the spokes instead of bunching at the shorter chord.
+  // A star with far more leaves than its ring can hold (pathological/star: 400) gets a halo
+  // instead: the ideal distances among hub and leaves are those of a canonical halo layout, which
+  // is exactly embeddable, so MDS reproduces it and the solve keeps it (vision item D4).
   for (let hub = 0; hub < m; hub++) {
     const leaves = nbrs[hub].filter(v => nbrs[v].length === 1)
     if (leaves.length < 3) continue
     const r = Math.max(L, ...leaves.map(v => preferred(hub, v)))
+    const chord = Math.min(...leaves.map(v => sep(hub, v)))
+    const capacity = Math.floor((2 * Math.PI * r) / chord)
+    if (leaves.length > HALO_OVERFLOW * capacity) {
+      const halo = haloPositions(leaves.length, [hub, ...leaves].map(i => nodes[members[i]]), gap)
+      const star = [hub, ...leaves]
+      for (let i = 0; i < star.length; i++) for (let j = i + 1; j < star.length; j++) {
+        const f = Math.hypot(halo[i].x - halo[j].x, halo[i].y - halo[j].y)
+        d[star[i] * m + star[j]] = f; d[star[j] * m + star[i]] = f
+      }
+      continue
+    }
     const ring = Math.max(0, Math.min(2 * r, 2 * r * Math.sin(Math.PI / leaves.length)))
     for (let i = 0; i < leaves.length; i++) for (let j = i + 1; j < leaves.length; j++) {
       const a = leaves[i], b = leaves[j]
@@ -447,6 +465,25 @@ function buildComponentSolver(
       return s
     },
   }
+}
+
+/**
+ * Canonical halo for a hub with `k` leaves: the hub at the origin of a grid whose cell is the
+ * largest box plus the gap, and the leaves in the `k` cells nearest the hub by elliptical
+ * distance (PACK_ASPECT wide), so the filled region has the view's shape. Returns hub first.
+ */
+function haloPositions(k: number, star: readonly LayoutNode[], gap: number): Pt[] {
+  const cw = Math.max(...star.map(n => n.width)) + gap + 0.5
+  const ch = Math.max(...star.map(n => n.height)) + gap + 0.5
+  const R = Math.ceil(2 * Math.sqrt(k)) + 2
+  const cells: Array<{ x: number; y: number; d: number; a: number }> = []
+  for (let i = -R; i <= R; i++) for (let j = -R; j <= R; j++) {
+    if (i === 0 && j === 0) continue
+    const x = i * cw, y = j * ch
+    cells.push({ x, y, d: (x / PACK_ASPECT) ** 2 + y * y, a: Math.atan2(y, x) })
+  }
+  cells.sort((p, q) => p.d - q.d || p.a - q.a)
+  return [{ x: 0, y: 0 }, ...cells.slice(0, k).map(c => ({ x: c.x, y: c.y }))]
 }
 
 // ─── initial positions ───────────────────────────────────────────────────────

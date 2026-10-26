@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { organicLayout } from '../organicLayout'
+import { organicLayout, type OrganicLayoutEdge } from '../organicLayout'
 import type { LayoutNode, LayoutEdge } from '../graphLayout'
 
 const W = 138
@@ -231,6 +231,116 @@ describe('organicLayout', () => {
     // Ideal extent is about side × 160 px across; a seed in singular-value units was 1e8.
     expect(maxR).toBeLessThan(side * 160 * 4)
     expect(stressHistory[0]).toBeLessThan(1e9)
+  })
+
+  it('shelf-packs components into a block near the view aspect and grids the isolates beneath them', () => {
+    // Five 24-node chains-with-branches plus six isolates: circle packing spread these into a
+    // near-square disc with wide gaps; the block should be wider than tall and the isolates rows.
+    const ids: string[] = []
+    const edges: LayoutEdge[] = []
+    for (let c = 0; c < 5; c++) {
+      const members = Array.from({ length: 24 }, (_, i) => `c${c}_${i}`)
+      ids.push(...members)
+      edges.push(...chainEdges(members.slice(0, 12)))
+      for (let i = 12; i < 24; i++) edges.push({ source: members[i % 12], target: members[i] })
+    }
+    const isolates = Array.from({ length: 6 }, (_, i) => `iso${i}`)
+    ids.push(...isolates)
+    const nodes = unseeded(ids)
+    const { positions, stats } = organicLayout(nodes, edges)
+    expect(stats.components).toBe(11)
+    expect(minGap(nodes, positions)).toBeGreaterThanOrEqual(GAP)
+    const xs = [...positions.values()].map(p => p.x), ys = [...positions.values()].map(p => p.y)
+    const w = Math.max(...xs) - Math.min(...xs) + W, h = Math.max(...ys) - Math.min(...ys) + H
+    expect(w / h).toBeGreaterThan(1.2)
+    expect(w / h).toBeLessThan(2.4)
+    // Isolates: one row (or more) at the bottom, below every connected node, on a shared y.
+    const isoY = isolates.map(id => positions.get(id)!.y)
+    const connectedMaxY = Math.max(...ids.filter(id => !id.startsWith('iso')).map(id => positions.get(id)!.y))
+    expect(Math.min(...isoY)).toBeGreaterThan(connectedMaxY)
+    expect(new Set(isoY.map(y => Math.round(y))).size).toBeLessThanOrEqual(2)
+  })
+
+  it('lays a star far past its ring capacity out as a halo of the view aspect', () => {
+    const { nodes, edges } = star(400)
+    const { positions, stats } = organicLayout(nodes, edges)
+    expect(stats.scaledUp).toBe(0)
+    const xs = [...positions.values()].map(p => p.x), ys = [...positions.values()].map(p => p.y)
+    const w = Math.max(...xs) - Math.min(...xs) + W, h = Math.max(...ys) - Math.min(...ys) + H
+    // 400 cards of 162x54 cells cover about 3.5e6 px^2; a 1.6:1 ellipse of that area is 2670x1670.
+    expect(w).toBeLessThan(3000)
+    expect(h).toBeLessThan(1900)
+    expect(w / h).toBeGreaterThan(1.4)
+    const hub = positions.get('hub')!
+    const cx = (Math.max(...xs) + Math.min(...xs)) / 2, cy = (Math.max(...ys) + Math.min(...ys)) / 2
+    expect(Math.hypot(hub.x - cx, hub.y - cy)).toBeLessThan(200)
+    expect(minGap(nodes, positions)).toBeGreaterThanOrEqual(GAP)
+  })
+
+  describe('edge hints', () => {
+    const labelBox = (l: { width: number; height: number; offset?: number }, a: { x: number; y: number }, b: { x: number; y: number }) => {
+      const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1
+      const off = l.offset ?? 0
+      return { x: (a.x + b.x) / 2 - (dy / d) * off, y: (a.y + b.y) / 2 + (dx / d) * off, w: l.width, h: l.height }
+    }
+    const boxesTouch = (p: { x: number; y: number; w: number; h: number }, q: { x: number; y: number; w: number; h: number }) =>
+      Math.abs(p.x - q.x) < (p.w + q.w) / 2 && Math.abs(p.y - q.y) < (p.h + q.h) / 2
+
+    it('floors adjacent ideal distances at an edge\'s preferred length', () => {
+      const ids = ['a', 'b', 'c']
+      const short = organicLayout(unseeded(ids), chainEdges(ids))
+      const long = organicLayout(unseeded(ids), [{ source: 'a', target: 'b', length: 600 }, { source: 'b', target: 'c' }])
+      const dist = (r: { positions: Map<string, { x: number; y: number }> }, u: string, v: string) => {
+        const p = r.positions.get(u)!, q = r.positions.get(v)!
+        return Math.hypot(p.x - q.x, p.y - q.y)
+      }
+      // A floor on the ideal distance, not a post-condition: the solve still trades it off against
+      // the other pairs (c wants 2 hops = 320 px from a, less than 600 - 165).
+      expect(dist(long, 'a', 'b')).toBeGreaterThan(dist(short, 'a', 'b') + 300)
+      expect(dist(long, 'a', 'b')).toBeGreaterThan(450)
+    })
+
+    it('keeps a labelled hub\'s labels clear of both endpoints and of each other', () => {
+      // 12 labelled spokes with wide labels: at the default ring they pile on the hub and each other.
+      const ids = ['hub', ...Array.from({ length: 12 }, (_, i) => `n${i}`)]
+      const label = { width: 165, height: 30, offset: 18 }
+      const edges: OrganicLayoutEdge[] = ids.slice(1).map(id => ({ source: 'hub', target: id, length: 220, label }))
+      const nodes = unseeded(ids)
+      const { positions, stats } = organicLayout(nodes, edges)
+      expect(stats.scaledUp).toBe(0)
+      expect(minGap(nodes, positions)).toBeGreaterThanOrEqual(GAP)
+      const boxes = edges.map(e => labelBox(label, positions.get(e.source)!, positions.get(e.target)!))
+      edges.forEach((e, i) => {
+        for (const end of [e.source, e.target]) {
+          const p = positions.get(end)!
+          expect(boxesTouch(boxes[i], { x: p.x, y: p.y, w: W, h: H })).toBe(false)
+        }
+        for (let j = i + 1; j < edges.length; j++) expect(boxesTouch(boxes[i], boxes[j])).toBe(false)
+      })
+    })
+
+    it('re-running a labelled layout on its own output moves nothing', () => {
+      const ids = ['hub', ...Array.from({ length: 8 }, (_, i) => `n${i}`), 'far']
+      const label = { width: 120, height: 30, offset: 20 }
+      const edges: OrganicLayoutEdge[] = [...ids.slice(1, 9).map(id => ({ source: 'hub', target: id, label })), { source: 'n0', target: 'far', label }]
+      const first = organicLayout(unseeded(ids), edges)
+      const warm = ids.map(id => ({ id, ...first.positions.get(id)!, width: W, height: H }))
+      const second = organicLayout(warm, edges)
+      expect(second.stats.warmStart).toBe(true)
+      expect(maxDisplacement(first.positions, second.positions)).toBeLessThan(1e-9)
+    })
+
+    it('stays finite when a labelled sketch is re-solved in full with a new node', () => {
+      const ids = ['hub', ...Array.from({ length: 10 }, (_, i) => `n${i}`)]
+      const label = { width: 150, height: 30, offset: 25 }
+      const edges: OrganicLayoutEdge[] = ids.slice(1).map((id, i) => ({ source: i % 2 ? 'hub' : id, target: i % 2 ? id : 'hub', label }))
+      const first = organicLayout(unseeded(ids), edges)
+      const warm = [...ids.map(id => ({ id, ...first.positions.get(id)!, width: W, height: H })), { id: 'new', x: NaN, y: NaN, width: W, height: H }]
+      const { positions } = organicLayout(warm, [...edges, { source: 'hub', target: 'new', label }], { scope: 'all' })
+      for (const p of positions.values()) expect(Number.isFinite(p.x) && Number.isFinite(p.y)).toBe(true)
+      const all = [...ids, 'new'].map(id => ({ id, x: 0, y: 0, width: W, height: H }))
+      expect(minGap(all, positions)).toBeGreaterThanOrEqual(GAP)
+    })
   })
 
   it('ignores self-loops, duplicate edges and edges to unknown nodes', () => {
