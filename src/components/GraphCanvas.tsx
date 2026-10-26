@@ -2575,15 +2575,18 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
                   // Galaxy: a structural edge is an orbit link — the geometry already says
                   // "contains" — so its label only shows when the edge or an end is in focus.
                   // Labels on every orbit link buried the bodies (the original charts draw none).
-                  // ux-navigation: the same rule — a page -> view fan edge is viewFanGap (40 px)
-                  // long and page -> child-page edges are the tree; fan position and depth
-                  // already say "contains". A label on every fan edge piles up on the sibling
-                  // views and the boxes (heimdall-layout-loop judge, 2026-10-26: critical
-                  // occlusion on the showcase data).
-                  const edgeLabel =
-                    (layout === "galaxy" || layout === "ux-navigation") && structural && !touchesFocus
-                      ? undefined
-                      : edge.label;
+                  // ux-navigation: the same rule for structural edges — a page -> view fan edge
+                  // is viewFanGap (40 px) long and page -> child-page edges are the tree; fan
+                  // position and depth already say "contains" — and for navigation routes when
+                  // showAllRelations draws them all at once: a label on every route collides
+                  // with the next route's and with the boxes it passes (heimdall-layout-loop
+                  // judge, 2026-10-26: critical occlusion on the showcase and test-page data for
+                  // both). A route revealed by hovering an endpoint is in focus and keeps its
+                  // label, as does any edge that is hovered or selected.
+                  const labelOnlyInFocus =
+                    (layout === "galaxy" && structural) ||
+                    (layout === "ux-navigation" && (structural || navigationRoute));
+                  const edgeLabel = labelOnlyInFocus && !touchesFocus ? undefined : edge.label;
                   return (
                     <GraphEdgeInternal
                       key={edge.id}
