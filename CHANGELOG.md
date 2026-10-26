@@ -4,6 +4,21 @@ All notable changes to `@tinkermonkey/heimdall-ui` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`GraphCanvas`** — `layout="organic"`, the first mode of the layout-engine rework and the
+  intended successor to `force` / `force-clustered`. A headless, deterministic
+  `organicLayout()` (also exported): stress majorization seeded by classical MDS, with a
+  GTree-style overlap-removal stage that makes zero overlap and `nodeMargin` (as a minimum
+  box-to-box gap, default 24 px) hard post-conditions, and a warm-start rule under which
+  re-running the engine on its own output is a no-op. Nodes with explicit `x`/`y` are pinned
+  and held exactly. On the 31-node technology-layer benchmark, neighborhood preservation goes
+  from 0.34 (`force`) to 0.62 and scale-fitted stress from 0.151 to 0.039; 400-leaf stars,
+  which drove `force` to `NaN`, stay finite. Proof of concept: no clustering option yet, and
+  isolates are circle-packed rather than gridded.
+
 ## [0.8.1]
 
 ### Fixed

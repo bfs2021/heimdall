@@ -161,6 +161,7 @@ export {
   type ClusteredLayoutResult,
 } from './utils/graphLayout'
 export { galaxyLayout, type GalaxyLayoutNode, type GalaxyLayoutEdge, type GalaxyLayoutOptions } from './utils/galaxyLayout'
+export { organicLayout, type OrganicLayoutOptions, type OrganicLayoutResult, type OrganicLayoutStats } from './utils/organicLayout'
 export { uxNavLayout, type UxNavLayoutOptions } from './utils/uxNavLayout'
 export { radialTreeLayout, type RadialTreeLayoutOptions, type RadialTreeLayoutResult, type RingGeometry } from './utils/radialTreeLayout'
 export { visibleNavigationEdgeIds } from './utils/uxNavEdgeVisibility'
