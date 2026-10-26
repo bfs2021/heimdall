@@ -2079,27 +2079,23 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
 
       if (navEdges.length === 0) return new Map<string, any>();
 
-      // Collect edge data with their rects, tracking all endpoint rects
-      const endpointRects = new Set<typeof nodeRects[0]>();
       const edgesWithRects = navEdges
         .map((edge) => {
           const src = getNodeRect(edge.sourceId);
           const tgt = getNodeRect(edge.targetId);
           if (!src || !tgt) return null;
-          endpointRects.add(src);
-          endpointRects.add(tgt);
           return { id: edge.id, source: src, target: tgt };
         })
         .filter((e): e is NonNullable<typeof e> => e !== null);
 
       if (edgesWithRects.length === 0) return new Map<string, any>();
 
-      // Exclude endpoint nodes from obstacles (to match single-edge routing behavior)
-      const obstacleRects = nodeRects.filter((rect) => !endpointRects.has(rect));
-
-      // Navigation edges route over structural edges, not around them
-      // Call batch router with all navigation edges and filtered obstacles
-      return routeNavigationEdges(edgesWithRects, obstacleRects, DEFAULT_TRACE_SPACING);
+      // Every node box is an obstacle; the router drops each route's OWN two endpoints when it
+      // routes that route (channelRouter ROUTER_CONTRACT_VERSION 2). Removing every route's
+      // endpoints up front, as this did before, let a route run straight through a node that
+      // happened to be the endpoint of some other route.
+      // Navigation edges route over structural edges, not around them.
+      return routeNavigationEdges(edgesWithRects, nodeRects, DEFAULT_TRACE_SPACING);
     }, [layout, isNavigationRoute, edges, getNodeRect, nodeRects, isStructuralEdge, structuralEdgeCurvature]);
 
     const hierarchyMetaFor = useCallback(

@@ -14,224 +14,200 @@ export interface RoutedEdge {
 /** Default spacing (px) between parallel segments when nudging overlapping edges apart */
 export const DEFAULT_TRACE_SPACING = 16
 
+/**
+ * Router contract version, read by callers that need to know how to build the obstacle set:
+ *   1 — the caller removed every route endpoint from `obstacles` itself.
+ *   2 — the caller passes every node rect; the router drops each route's own two endpoints
+ *       (and only those) when routing that route. GraphCanvas passes all node rects.
+ */
+export const ROUTER_CONTRACT_VERSION = 2
+
+/** Clearance kept between a route and any node box it detours around. */
+const OBSTACLE_PADDING = 20
+
+/** A port is kept at least this far from its node's corner when nudged along the side. */
+const PORT_CORNER_MARGIN = 2
+
 export function routeNavigationEdge(
   source: EdgeEndpointRect,
   target: EdgeEndpointRect,
   obstacles: readonly EdgeEndpointRect[] = []
 ): RoutedEdge {
-  // Exit point from source (middle of right/left edge depending on target position)
-  const sourceExit = getExitPoint(source, target)
-
-  // Entry point to target (middle of right/left edge depending on source position)
-  const targetEntry = getEntryPoint(target, source)
-
-  // Build the orthogonal path with obstacle avoidance
-  const points = buildOrthogonalPath(sourceExit, targetEntry, obstacles)
-
-  // Convert points to SVG path string
-  const d = pointsToPathString(points)
-
-  // Compute midpoint and angle for label placement
-  const mid = points[Math.floor(points.length / 2)]
-  const angle = Math.atan2(
-    points[points.length - 1].y - points[points.length - 2].y,
-    points[points.length - 1].x - points[points.length - 2].x
-  )
-
-  return { d, mid, angle, points, isPolyline: true }
+  const points = buildOrthogonalPath(source, target, withoutEndpoints(obstacles, source, target))
+  return finishRoute(points)
 }
 
 /**
- * Routes multiple navigation edges at once with obstacle avoidance.
- * Routes each edge individually and applies a nudge pass to spread overlapping segments.
+ * Routes multiple navigation edges at once with obstacle avoidance: each route is built
+ * against the node boxes (never against other routes), then collinear overlapping segments of
+ * different routes are nudged apart by `traceSpacing` without moving a port off its node side.
  */
 export function routeNavigationEdges(
   edges: Array<{ id: string; source: EdgeEndpointRect; target: EdgeEndpointRect }>,
   allObstacles: readonly EdgeEndpointRect[] = [],
   traceSpacing: number = DEFAULT_TRACE_SPACING
 ): Map<string, RoutedEdge> {
-  // Route each edge individually, but consider previous routes as soft obstacles
   const routes = new Map<string, RoutedEdge>()
-  const routedRects: EdgeEndpointRect[] = []
+  const endpoints = new Map<string, { source: EdgeEndpointRect; target: EdgeEndpointRect }>()
 
   for (const edge of edges) {
-    const obstacles = [...allObstacles, ...routedRects]
-    const routed = routeNavigationEdge(edge.source, edge.target, obstacles)
-    routes.set(edge.id, routed)
-
-    // Create a bounding rect for this route to use as obstacle for subsequent edges
-    const allX = routed.points.map(p => p.x)
-    const allY = routed.points.map(p => p.y)
-    routedRects.push({
-      x: (Math.min(...allX) + Math.max(...allX)) / 2,
-      y: (Math.min(...allY) + Math.max(...allY)) / 2,
-      width: Math.max(...allX) - Math.min(...allX) + 10,
-      height: Math.max(...allY) - Math.min(...allY) + 10,
-    })
+    const points = buildOrthogonalPath(edge.source, edge.target, withoutEndpoints(allObstacles, edge.source, edge.target))
+    routes.set(edge.id, finishRoute(points))
+    endpoints.set(edge.id, { source: edge.source, target: edge.target })
   }
 
-  // Apply nudge pass to spread overlapping segments
-  nudgeOverlappingSegments(routes, traceSpacing)
+  nudgeOverlappingSegments(routes, endpoints, allObstacles, traceSpacing)
 
   return routes
 }
 
+function finishRoute(points: Point[]): RoutedEdge {
+  const route = { d: '', mid: points[0], angle: 0, points, isPolyline: true as const }
+  updateRouteMetadata(route)
+  return route
+}
+
+function sameRect(a: EdgeEndpointRect, b: EdgeEndpointRect): boolean {
+  return a === b || (a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height)
+}
+
+/** The obstacle set for one route: every box except the route's own two endpoints. */
+function withoutEndpoints(
+  obstacles: readonly EdgeEndpointRect[],
+  source: EdgeEndpointRect,
+  target: EdgeEndpointRect
+): EdgeEndpointRect[] {
+  return obstacles.filter(o => !sameRect(o, source) && !sameRect(o, target))
+}
+
+// ─── nudging ────────────────────────────────────────────────────────────────
+
+interface SegmentRef {
+  id: string
+  segmentIndex: number
+  lo: number
+  hi: number
+}
+
 /**
- * Post-processes routed edges to spread overlapping segments by applying perpendicular offsets.
- * This ensures that parallel segments from different routes are visually distinct and don't
- * completely overlap.
+ * Post-processes routed edges to spread overlapping collinear segments by applying perpendicular
+ * offsets, so parallel segments from different routes stay visually distinct. Overlapping
+ * segments on one line form a cluster that is fanned out symmetrically around the line,
+ * `traceSpacing` apart, in one assignment — the earlier pairwise nudge accumulated ±8 px per
+ * pair, so four routes sharing a lane pushed one of them 32 px, into the boxes the lane was
+ * routed around. A shift is applied only if it keeps every port on its node side (a first or
+ * last segment can slide along the side, never off it) and does not run the route into a box.
  */
 function nudgeOverlappingSegments(
   routes: Map<string, RoutedEdge>,
+  endpoints: Map<string, { source: EdgeEndpointRect; target: EdgeEndpointRect }>,
+  obstacles: readonly EdgeEndpointRect[],
   traceSpacing: number = DEFAULT_TRACE_SPACING
 ): void {
-  // Track which route pairs have already been nudged to avoid double-nudging
-  const nudgedPairs = new Set<string>()
-
-  // Group segments by their axis and position
-  const horizontalSegments = new Map<number, Array<{ id: string; segmentIndex: number; x1: number; x2: number }>>()
-  const verticalSegments = new Map<number, Array<{ id: string; segmentIndex: number; y1: number; y2: number }>>()
+  const horizontal = new Map<number, SegmentRef[]>()
+  const vertical = new Map<number, SegmentRef[]>()
 
   for (const [id, route] of routes) {
     for (let i = 0; i < route.points.length - 1; i++) {
       const p1 = route.points[i]
       const p2 = route.points[i + 1]
-
-      // Horizontal segment
+      if (p1.x === p2.x && p1.y === p2.y) continue
       if (p1.y === p2.y) {
-        const y = Math.round(p1.y)
-        if (!horizontalSegments.has(y)) {
-          horizontalSegments.set(y, [])
-        }
-        horizontalSegments.get(y)!.push({
-          id,
-          segmentIndex: i,
-          x1: Math.min(p1.x, p2.x),
-          x2: Math.max(p1.x, p2.x),
-        })
-      }
-
-      // Vertical segment
-      if (p1.x === p2.x) {
-        const x = Math.round(p1.x)
-        if (!verticalSegments.has(x)) {
-          verticalSegments.set(x, [])
-        }
-        verticalSegments.get(x)!.push({
-          id,
-          segmentIndex: i,
-          y1: Math.min(p1.y, p2.y),
-          y2: Math.max(p1.y, p2.y),
-        })
+        const key = Math.round(p1.y)
+        if (!horizontal.has(key)) horizontal.set(key, [])
+        horizontal.get(key)!.push({ id, segmentIndex: i, lo: Math.min(p1.x, p2.x), hi: Math.max(p1.x, p2.x) })
+      } else if (p1.x === p2.x) {
+        const key = Math.round(p1.x)
+        if (!vertical.has(key)) vertical.set(key, [])
+        vertical.get(key)!.push({ id, segmentIndex: i, lo: Math.min(p1.y, p2.y), hi: Math.max(p1.y, p2.y) })
       }
     }
   }
 
-  // Detect overlapping horizontal segments and nudge them apart vertically
-  for (const segments of horizontalSegments.values()) {
-    for (let i = 0; i < segments.length - 1; i++) {
-      for (let j = i + 1; j < segments.length; j++) {
-        const seg1 = segments[i]
-        const seg2 = segments[j]
-
-        // Check if segments overlap in x
-        if (seg1.x1 < seg2.x2 && seg1.x2 > seg2.x1) {
-          const pairKey = [seg1.id, seg2.id].sort().join(':')
-          if (!nudgedPairs.has(pairKey)) {
-            const route1 = routes.get(seg1.id)!
-            const route2 = routes.get(seg2.id)!
-            if (route1 && route2) {
-              nudgeHorizontalSegment(route1, seg1.segmentIndex, route2, seg2.segmentIndex, traceSpacing)
-              nudgedPairs.add(pairKey)
-            }
-          }
+  for (const [axis, groups] of [['y', horizontal], ['x', vertical]] as const) {
+    for (const segments of groups.values()) {
+      // Clusters of mutually overlapping intervals (connected components along the line).
+      const sorted = [...segments].sort((a, b) => a.lo - b.lo || a.id.localeCompare(b.id))
+      let cluster: SegmentRef[] = []
+      let clusterHi = -Infinity
+      const clusters: SegmentRef[][] = []
+      for (const seg of sorted) {
+        if (cluster.length > 0 && seg.lo < clusterHi) {
+          cluster.push(seg)
+          clusterHi = Math.max(clusterHi, seg.hi)
+        } else {
+          if (cluster.length > 1) clusters.push(cluster)
+          cluster = [seg]
+          clusterHi = seg.hi
         }
       }
-    }
-  }
+      if (cluster.length > 1) clusters.push(cluster)
 
-  // Detect overlapping vertical segments and nudge them apart horizontally
-  for (const segments of verticalSegments.values()) {
-    for (let i = 0; i < segments.length - 1; i++) {
-      for (let j = i + 1; j < segments.length; j++) {
-        const seg1 = segments[i]
-        const seg2 = segments[j]
-
-        // Check if segments overlap in y
-        if (seg1.y1 < seg2.y2 && seg1.y2 > seg2.y1) {
-          const pairKey = [seg1.id, seg2.id].sort().join(':')
-          if (!nudgedPairs.has(pairKey)) {
-            const route1 = routes.get(seg1.id)!
-            const route2 = routes.get(seg2.id)!
-            if (route1 && route2) {
-              nudgeVerticalSegment(route1, seg1.segmentIndex, route2, seg2.segmentIndex, traceSpacing)
-              nudgedPairs.add(pairKey)
+      for (const members of clusters) {
+        // One slot per route (a route with two collinear segments here keeps one offset).
+        const ids = [...new Set(members.map(m => m.id))]
+        if (ids.length < 2) continue
+        // A route whose slot would run it into a box or off a port takes the nearest free
+        // slot instead (mirrored first, then further out), never one another route holds.
+        const taken = new Set<number>()
+        ids.forEach((id, slot) => {
+          const delta = (slot - (ids.length - 1) / 2) * traceSpacing
+          const route = routes.get(id)!
+          const ends = endpoints.get(id)!
+          const own = withoutEndpoints(obstacles, ends.source, ends.target)
+          const options = [delta, -delta]
+          for (let k = Math.ceil(ids.length / 2); k <= ids.length; k++) options.push(k * traceSpacing, -k * traceSpacing)
+          for (const d of options) {
+            if (taken.has(d)) continue
+            if (d === 0) {
+              taken.add(d)
+              break
             }
+            const segs = members.filter(m => m.id === id)
+            if (!segs.every(seg => canShiftSegment(route, seg.segmentIndex, axis, d, ends))) continue
+            let points = route.points
+            for (const seg of segs) points = shiftedPoints(points, seg.segmentIndex, axis, d)
+            if (pathHits(points, own, 0) > pathHits(route.points, own, 0)) continue
+            route.points = points
+            updateRouteMetadata(route)
+            taken.add(d)
+            break
           }
-        }
+        })
       }
     }
   }
 }
 
-/**
- * Nudges a specific horizontal segment of a route vertically to separate from another.
- * Nudging the endpoints maintains 90° joints at the shared corner points.
- */
-function nudgeHorizontalSegment(
-  route1: RoutedEdge,
-  segmentIndex1: number,
-  route2: RoutedEdge,
-  segmentIndex2: number,
-  spacing: number
-): void {
-  const offset = spacing / 2
-
-  // Nudge the two endpoints of each segment
-  const seg1Start = segmentIndex1
-  const seg1End = segmentIndex1 + 1
-  const seg2Start = segmentIndex2
-  const seg2End = segmentIndex2 + 1
-
-  route1.points[seg1Start] = { x: route1.points[seg1Start].x, y: route1.points[seg1Start].y - offset }
-  route1.points[seg1End] = { x: route1.points[seg1End].x, y: route1.points[seg1End].y - offset }
-
-  route2.points[seg2Start] = { x: route2.points[seg2Start].x, y: route2.points[seg2Start].y + offset }
-  route2.points[seg2End] = { x: route2.points[seg2End].x, y: route2.points[seg2End].y + offset }
-
-  // Recompute path string and metadata after nudging
-  updateRouteMetadata(route1)
-  updateRouteMetadata(route2)
+/** Whether shifting segment `index` of `route` by `delta` along `axis` keeps both ports on their node sides. */
+function canShiftSegment(
+  route: RoutedEdge,
+  index: number,
+  axis: 'x' | 'y',
+  delta: number,
+  ends: { source: EdgeEndpointRect; target: EdgeEndpointRect }
+): boolean {
+  const last = route.points.length - 2
+  if (index === 0 && !portStaysOnSide(route.points[0], ends.source, axis, delta)) return false
+  if (index === last && !portStaysOnSide(route.points[last + 1], ends.target, axis, delta)) return false
+  return true
 }
 
-/**
- * Nudges a specific vertical segment of a route horizontally to separate from another.
- * Nudging the endpoints maintains 90° joints at the shared corner points.
- */
-function nudgeVerticalSegment(
-  route1: RoutedEdge,
-  segmentIndex1: number,
-  route2: RoutedEdge,
-  segmentIndex2: number,
-  spacing: number
-): void {
-  const offset = spacing / 2
+function portStaysOnSide(port: Point, rect: EdgeEndpointRect, axis: 'x' | 'y', delta: number): boolean {
+  // A port on the left/right side may slide in y within the side; one on the top/bottom side
+  // may slide in x. Sliding it in the other direction would take it off the box.
+  const onVerticalSide = Math.abs(Math.abs(port.x - rect.x) - rect.width / 2) < 0.01
+  const onHorizontalSide = Math.abs(Math.abs(port.y - rect.y) - rect.height / 2) < 0.01
+  if (axis === 'y') {
+    if (!onVerticalSide) return false
+    return Math.abs(port.y + delta - rect.y) <= rect.height / 2 - PORT_CORNER_MARGIN
+  }
+  if (!onHorizontalSide) return false
+  return Math.abs(port.x + delta - rect.x) <= rect.width / 2 - PORT_CORNER_MARGIN
+}
 
-  // Nudge the two endpoints of each segment
-  const seg1Start = segmentIndex1
-  const seg1End = segmentIndex1 + 1
-  const seg2Start = segmentIndex2
-  const seg2End = segmentIndex2 + 1
-
-  route1.points[seg1Start] = { x: route1.points[seg1Start].x - offset, y: route1.points[seg1Start].y }
-  route1.points[seg1End] = { x: route1.points[seg1End].x - offset, y: route1.points[seg1End].y }
-
-  route2.points[seg2Start] = { x: route2.points[seg2Start].x + offset, y: route2.points[seg2Start].y }
-  route2.points[seg2End] = { x: route2.points[seg2End].x + offset, y: route2.points[seg2End].y }
-
-  // Recompute path string and metadata after nudging
-  updateRouteMetadata(route1)
-  updateRouteMetadata(route2)
+function shiftedPoints(points: Point[], index: number, axis: 'x' | 'y', delta: number): Point[] {
+  return points.map((p, k) => (k === index || k === index + 1 ? (axis === 'y' ? { x: p.x, y: p.y + delta } : { x: p.x + delta, y: p.y }) : p))
 }
 
 /**
@@ -240,215 +216,157 @@ function nudgeVerticalSegment(
 function updateRouteMetadata(route: RoutedEdge): void {
   route.d = pointsToPathString(route.points)
   route.mid = route.points[Math.floor(route.points.length / 2)]
-  route.angle = Math.atan2(
-    route.points[route.points.length - 1].y - route.points[route.points.length - 2].y,
-    route.points[route.points.length - 1].x - route.points[route.points.length - 2].x
-  )
+  const n = route.points.length
+  route.angle = n >= 2
+    ? Math.atan2(route.points[n - 1].y - route.points[n - 2].y, route.points[n - 1].x - route.points[n - 2].x)
+    : 0
 }
 
-function getExitPoint(source: EdgeEndpointRect, target: EdgeEndpointRect): Point {
-  const sourceCenter = { x: source.x, y: source.y }
-  const targetCenter = { x: target.x, y: target.y }
+// ─── path construction ──────────────────────────────────────────────────────
 
-  // Prefer horizontal exit (right/left sides) if target is significantly left or right
-  if (Math.abs(targetCenter.x - sourceCenter.x) > Math.abs(targetCenter.y - sourceCenter.y)) {
-    return {
-      x: targetCenter.x > sourceCenter.x
-        ? source.x + source.width / 2  // exit right
-        : source.x - source.width / 2, // exit left
-      y: source.y, // middle height of source
-    }
-  }
+type Side = 'left' | 'right' | 'top' | 'bottom'
 
-  // Otherwise exit top or bottom
-  return {
-    x: source.x,
-    y: targetCenter.y > sourceCenter.y
-      ? source.y + source.height / 2  // exit bottom
-      : source.y - source.height / 2, // exit top
+function portOn(rect: EdgeEndpointRect, side: Side): Point {
+  switch (side) {
+    case 'left': return { x: rect.x - rect.width / 2, y: rect.y }
+    case 'right': return { x: rect.x + rect.width / 2, y: rect.y }
+    case 'top': return { x: rect.x, y: rect.y - rect.height / 2 }
+    case 'bottom': return { x: rect.x, y: rect.y + rect.height / 2 }
   }
 }
 
-function getEntryPoint(target: EdgeEndpointRect, source: EdgeEndpointRect): Point {
-  const sourceCenter = { x: source.x, y: source.y }
-  const targetCenter = { x: target.x, y: target.y }
-
-  // Prefer horizontal entry (right/left sides) if source is significantly left or right
-  if (Math.abs(sourceCenter.x - targetCenter.x) > Math.abs(sourceCenter.y - targetCenter.y)) {
-    return {
-      x: sourceCenter.x > targetCenter.x
-        ? target.x + target.width / 2  // enter from right
-        : target.x - target.width / 2, // enter from left
-      y: target.y, // middle height of target
-    }
-  }
-
-  // Otherwise enter from top or bottom
-  return {
-    x: target.x,
-    y: sourceCenter.y > targetCenter.y
-      ? target.y + target.height / 2  // enter from bottom
-      : target.y - target.height / 2, // enter from top
-  }
-}
-
-function hSegmentIntersectsBox(
-  x1: number,
-  x2: number,
-  y: number,
-  box: EdgeEndpointRect,
-  padding: number = 0
-): boolean {
+function hSegmentIntersectsBox(x1: number, x2: number, y: number, box: EdgeEndpointRect, padding: number = 0): boolean {
   const boxLeft = box.x - box.width / 2 - padding
   const boxRight = box.x + box.width / 2 + padding
   const boxTop = box.y - box.height / 2 - padding
   const boxBottom = box.y + box.height / 2 + padding
-
-  const segLeft = Math.min(x1, x2)
-  const segRight = Math.max(x1, x2)
-
-  return (
-    y >= boxTop &&
-    y <= boxBottom &&
-    segLeft < boxRight &&
-    segRight > boxLeft
-  )
+  // Strict: a lane that runs exactly `padding` outside a box is clear of it.
+  return y > boxTop && y < boxBottom && Math.min(x1, x2) < boxRight && Math.max(x1, x2) > boxLeft
 }
 
-function vSegmentIntersectsBox(
-  x: number,
-  y1: number,
-  y2: number,
-  box: EdgeEndpointRect,
-  padding: number = 0
-): boolean {
+function vSegmentIntersectsBox(x: number, y1: number, y2: number, box: EdgeEndpointRect, padding: number = 0): boolean {
   const boxLeft = box.x - box.width / 2 - padding
   const boxRight = box.x + box.width / 2 + padding
   const boxTop = box.y - box.height / 2 - padding
   const boxBottom = box.y + box.height / 2 + padding
-
-  const segTop = Math.min(y1, y2)
-  const segBottom = Math.max(y1, y2)
-
-  return (
-    x >= boxLeft &&
-    x <= boxRight &&
-    segTop < boxBottom &&
-    segBottom > boxTop
-  )
+  return x > boxLeft && x < boxRight && Math.min(y1, y2) < boxBottom && Math.max(y1, y2) > boxTop
 }
 
+/** Number of (segment, obstacle) pairs where a segment of the path crosses a padded obstacle box. */
+function pathHits(points: Point[], obstacles: readonly EdgeEndpointRect[], padding: number): number {
+  let hits = 0
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i]
+    const b = points[i + 1]
+    if (a.x === b.x && a.y === b.y) continue
+    for (const obs of obstacles) {
+      if (a.y === b.y ? hSegmentIntersectsBox(a.x, b.x, a.y, obs, padding) : vSegmentIntersectsBox(a.x, a.y, b.y, obs, padding)) hits++
+    }
+  }
+  return hits
+}
+
+function dropDuplicatePoints(points: Point[]): Point[] {
+  const out: Point[] = []
+  for (const p of points) {
+    const last = out[out.length - 1]
+    if (!last || last.x !== p.x || last.y !== p.y) out.push(p)
+  }
+  return out
+}
+
+/**
+ * Builds the orthogonal path between two boxes. Every candidate's ports are chosen to match the
+ * direction the path actually leaves and arrives in (a vertical first segment starts on the
+ * top or bottom side, a horizontal one on the left or right), and every candidate — the two
+ * direct L shapes, then horizontal and vertical detour lanes past the blocking boxes, then
+ * lanes past every obstacle — is checked segment by segment against the obstacles. The first
+ * clear candidate wins; if none is clear, the one crossing the fewest padded boxes.
+ *
+ * Earlier the detour's own segments were never re-checked (its lane could run through another
+ * box), the ports were picked by the dominant axis regardless of the path's first move (a
+ * route could leave the right side and immediately run up along that side), and a blocked
+ * route fell back to a lane above or below every obstacle unconditionally.
+ */
 function buildOrthogonalPath(
-  source: Point,
-  target: Point,
+  source: EdgeEndpointRect,
+  target: EdgeEndpointRect,
   obstacles: readonly EdgeEndpointRect[]
 ): Point[] {
-  const padding = 20
+  const padding = OBSTACLE_PADDING
+  const dx = target.x - source.x
+  const dy = target.y - source.y
+  const hSide = (from: Point | EdgeEndpointRect, to: Point | EdgeEndpointRect): Side => (to.x >= from.x ? 'right' : 'left')
+  const vSide = (from: Point | EdgeEndpointRect, to: Point | EdgeEndpointRect): Side => (to.y >= from.y ? 'bottom' : 'top')
+  const opposite = (side: Side): Side => ({ left: 'right', right: 'left', top: 'bottom', bottom: 'top' } as const)[side]
 
-  // Try horizontal-first routing (right/left then up/down)
-  const hFirstPath = tryHorizontalFirstPath(source, target, obstacles, padding)
-  if (hFirstPath) return hFirstPath
-
-  // Try vertical-first routing (up/down then right/left)
-  const vFirstPath = tryVerticalFirstPath(source, target, obstacles, padding)
-  if (vFirstPath) return vFirstPath
-
-  // Fallback: route outside the bounding box of all obstacles
-  if (obstacles.length > 0) {
-    const minY = Math.min(...obstacles.map(o => o.y - o.height / 2))
-    const maxY = Math.max(...obstacles.map(o => o.y + o.height / 2))
-
-    // Try routing above or below the obstacle cluster
-    const aboveY = minY - padding
-    const belowY = maxY + padding
-
-    const distToAbove = Math.abs(aboveY - source.y)
-    const distToBelow = Math.abs(belowY - source.y)
-    const routeY = distToAbove <= distToBelow ? aboveY : belowY
-
-    return [source, { x: source.x, y: routeY }, { x: target.x, y: routeY }, target]
+  if (dx === 0 && dy === 0) {
+    return [portOn(source, 'right'), portOn(target, 'right')]
   }
 
-  // No obstacles: simple L-path
-  return [source, { x: target.x, y: source.y }, target]
-}
+  const candidates: Point[][] = []
 
-function tryHorizontalFirstPath(
-  source: Point,
-  target: Point,
-  obstacles: readonly EdgeEndpointRect[],
-  padding: number
-): Point[] | null {
-  const corner = { x: target.x, y: source.y }
+  // Direct connections: same row or column.
+  if (dy === 0) candidates.push([portOn(source, hSide(source, target)), portOn(target, opposite(hSide(source, target)))])
+  if (dx === 0) candidates.push([portOn(source, vSide(source, target)), portOn(target, opposite(vSide(source, target)))])
 
-  // Check if direct path crosses obstacles
-  const hSegClear = !obstacles.some(obs =>
-    hSegmentIntersectsBox(source.x, target.x, source.y, obs, padding)
-  )
-  const vSegClear = !obstacles.some(obs =>
-    vSegmentIntersectsBox(target.x, source.y, target.y, obs, padding)
-  )
-
-  if (hSegClear && vSegClear) {
-    return [source, corner, target]
+  if (dx !== 0 && dy !== 0) {
+    // Horizontal-first L: leave sideways, arrive from above/below.
+    const exitH = portOn(source, hSide(source, target))
+    const entryV = portOn(target, opposite(vSide(source, target)))
+    candidates.push([exitH, { x: entryV.x, y: exitH.y }, entryV])
+    // Vertical-first L: leave up/down, arrive sideways.
+    const exitV = portOn(source, vSide(source, target))
+    const entryH = portOn(target, opposite(hSide(source, target)))
+    candidates.push([exitV, { x: exitV.x, y: entryH.y }, entryH])
   }
 
-  // If blocked, try routing above/below obstacles
-  const obstaclesOnPath = obstacles.filter(obs =>
-    hSegmentIntersectsBox(source.x, target.x, source.y, obs, padding)
-  )
-
-  if (obstaclesOnPath.length > 0) {
-    // Route above the topmost obstacle
-    const topmost = obstaclesOnPath.reduce((min, obs) =>
-      obs.y - obs.height / 2 < min.y - min.height / 2 ? obs : min
-    )
-    const routeY = topmost.y - topmost.height / 2 - padding
-    const waypoint1 = { x: source.x, y: routeY }
-    const waypoint2 = { x: target.x, y: routeY }
-    return [source, waypoint1, waypoint2, target]
+  // Horizontal lanes: up/down from the source, across, up/down into the target.
+  const hLanes = (boxes: readonly EdgeEndpointRect[]): number[] => {
+    if (boxes.length === 0) return []
+    const above = Math.min(...boxes.map(o => o.y - o.height / 2)) - padding
+    const below = Math.max(...boxes.map(o => o.y + o.height / 2)) + padding
+    return Math.abs(above - source.y) <= Math.abs(below - source.y) ? [above, below] : [below, above]
+  }
+  const vLanes = (boxes: readonly EdgeEndpointRect[]): number[] => {
+    if (boxes.length === 0) return []
+    const left = Math.min(...boxes.map(o => o.x - o.width / 2)) - padding
+    const right = Math.max(...boxes.map(o => o.x + o.width / 2)) + padding
+    return Math.abs(right - source.x) <= Math.abs(left - source.x) ? [right, left] : [left, right]
+  }
+  const hLanePath = (laneY: number): Point[] => {
+    const exit = portOn(source, vSide(source, { x: source.x, y: laneY }))
+    const entry = portOn(target, vSide(target, { x: target.x, y: laneY }))
+    return [exit, { x: exit.x, y: laneY }, { x: entry.x, y: laneY }, entry]
+  }
+  const vLanePath = (laneX: number): Point[] => {
+    const exit = portOn(source, hSide(source, { x: laneX, y: source.y }))
+    const entry = portOn(target, hSide(target, { x: laneX, y: target.y }))
+    return [exit, { x: laneX, y: exit.y }, { x: laneX, y: entry.y }, entry]
   }
 
-  return null
-}
+  // Lanes past the boxes that block the direct horizontal / vertical run, then past everything.
+  const sourceExitH = portOn(source, hSide(source, target))
+  const onHRun = obstacles.filter(o => hSegmentIntersectsBox(sourceExitH.x, target.x, source.y, o, padding))
+  const sourceExitV = portOn(source, vSide(source, target))
+  const onVRun = obstacles.filter(o => vSegmentIntersectsBox(source.x, sourceExitV.y, target.y, o, padding))
+  for (const laneY of hLanes(onHRun)) candidates.push(hLanePath(laneY))
+  for (const laneX of vLanes(onVRun)) candidates.push(vLanePath(laneX))
+  for (const laneY of hLanes(obstacles)) candidates.push(hLanePath(laneY))
+  for (const laneX of vLanes(obstacles)) candidates.push(vLanePath(laneX))
 
-function tryVerticalFirstPath(
-  source: Point,
-  target: Point,
-  obstacles: readonly EdgeEndpointRect[],
-  padding: number
-): Point[] | null {
-  const corner = { x: source.x, y: target.y }
-
-  // Check if direct path crosses obstacles
-  const vSegClear = !obstacles.some(obs =>
-    vSegmentIntersectsBox(source.x, source.y, target.y, obs, padding)
-  )
-  const hSegClear = !obstacles.some(obs =>
-    hSegmentIntersectsBox(source.x, target.x, target.y, obs, padding)
-  )
-
-  if (vSegClear && hSegClear) {
-    return [source, corner, target]
+  let best: Point[] | null = null
+  let bestHits = Infinity
+  for (const candidate of candidates) {
+    const points = dropDuplicatePoints(candidate)
+    const hits = pathHits(points, obstacles, padding)
+    if (hits === 0) return points
+    if (hits < bestHits) {
+      best = points
+      bestHits = hits
+    }
   }
-
-  // If blocked, try routing left/right of obstacles
-  const obstaclesOnPath = obstacles.filter(obs =>
-    vSegmentIntersectsBox(source.x, source.y, target.y, obs, padding)
-  )
-
-  if (obstaclesOnPath.length > 0) {
-    // Route right of the rightmost obstacle
-    const rightmost = obstaclesOnPath.reduce((max, obs) =>
-      obs.x + obs.width / 2 > max.x + max.width / 2 ? obs : max
-    )
-    const routeX = rightmost.x + rightmost.width / 2 + padding
-    const waypoint1 = { x: routeX, y: source.y }
-    const waypoint2 = { x: routeX, y: target.y }
-    return [source, waypoint1, waypoint2, target]
-  }
-
-  return null
+  return best ?? [portOn(source, 'right'), portOn(target, 'left')]
 }
 
 function pointsToPathString(points: Point[]): string {
