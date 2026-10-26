@@ -125,17 +125,27 @@ export function uxNavLayout(
     const nodeHeight = 100 + rowSpacing
     const nodeWidth = 200 + columnSpacing
 
+    // Left-to-right order of the pages in this tree (pre-order over the child lists d3 will
+    // lay out in the same order), so separation() can tell which of its two arguments is the
+    // left node: d3-hierarchy passes (current, previousSibling) in its first walk and
+    // (leftContour, rightContour) in apportion — the opposite orders.
+    const preorder = new Map<string, number>()
+    root.eachBefore((node: any) => preorder.set(node.data.id, preorder.size))
+
     const treeLayout = tree<any>()
       .nodeSize([nodeWidth, nodeHeight])
       .separation((a, b) => {
-        // Base separation: nodes at same depth should be spaced apart
-        // Wider view fans need more horizontal clearance
-        const aFanWidth = getViewFanWidth(a.data.id)
-        const bFanWidth = getViewFanWidth(b.data.id)
-        const aWidth = getNodeDim(a.data.id).width + aFanWidth
-        const bWidth = getNodeDim(b.data.id).width + bFanWidth
-
-        return (aWidth + bWidth) / nodeWidth + 0.5
+        const [left, right] = preorder.get(a.data.id)! < preorder.get(b.data.id)! ? [a, b] : [b, a]
+        // The distance between the two centres has to clear exactly the left node's right half
+        // plus its view fan (fans only ever extend to the right) and the right node's left
+        // half, plus columnSpacing. Earlier this summed BOTH nodes' full widths and both fans
+        // (+ half a cell), roughly doubling every sibling gap: on heimdall's own showcase data
+        // the siblings `dashboard` (no fan) and `users` sat 762 px apart edge to edge, and the
+        // 12-node graph was 3,630 px wide (harness fit-to-view: 10.6 px nodes, below the 12 px
+        // legibility bar).
+        const leftExtent = getNodeDim(left.data.id).width / 2 + getViewFanWidth(left.data.id)
+        const rightExtent = getNodeDim(right.data.id).width / 2
+        return (leftExtent + rightExtent + columnSpacing) / nodeWidth
       })
 
     treeLayout(root)
@@ -186,23 +196,28 @@ export function uxNavLayout(
     }
     collectTreeNodes(rootId)
 
-    // Compute tree extent in d3 coordinate space (before translation)
-    // Include view fan widths so adjacent trees don't overlap
+    // Compute tree extent in d3 coordinate space (before translation), box edge to box edge:
+    // the leftmost page's left edge to the rightmost page's right edge plus its view fan, so
+    // adjacent trees don't overlap and the gap between them is exactly trunkSpacing. (The left
+    // edge used to be the leftmost page's CENTRE, so every tree started half a page width
+    // further left than accounted for and the real gap was trunkSpacing - width/2: 51 px
+    // instead of 120 with the default 138 px node.)
+    let minTreeExtent = bounds.minX
     let maxTreeExtent = bounds.maxX
     for (const pageId of treeNodeIds) {
       const pos = pagePositions.get(pageId)
       if (pos) {
         const pageDim = getNodeDim(pageId)
         const fanWidth = getViewFanWidth(pageId)
-        const rightExtent = pos.x + pageDim.width / 2 + fanWidth
-        maxTreeExtent = Math.max(maxTreeExtent, rightExtent)
+        minTreeExtent = Math.min(minTreeExtent, pos.x - pageDim.width / 2)
+        maxTreeExtent = Math.max(maxTreeExtent, pos.x + pageDim.width / 2 + fanWidth)
       }
     }
 
-    const treeWidth = maxTreeExtent - bounds.minX
+    const treeWidth = maxTreeExtent - minTreeExtent
 
     // Translate this tree's positions
-    const treeTranslateX = currentXOffset - bounds.minX
+    const treeTranslateX = currentXOffset - minTreeExtent
     const treeTranslateY = -bounds.minY // top-align all trees at y=0
 
     // Apply translation to all page nodes in this tree
