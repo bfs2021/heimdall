@@ -276,6 +276,34 @@ type InternalEdgeProps = GraphEdge & {
 // Margin (px, in graph space) kept clear around an edge label when steering it away from nodes.
 const EDGE_LABEL_MARGIN = 6;
 
+/** Layout hints for a labelled edge under layout="organic": the label's footprint padded by the
+ *  clear margin on every side, where the bowed edge carries it (bezierPath bows the midpoint by
+ *  min(80, 0.22 x length) / 2 to the left of source->target; the preferred length stands in for
+ *  the final one), and a preferred center-to-center length that leaves room for the label between
+ *  the two cards, averaged over edge directions (beside a horizontal edge the label's width and the
+ *  cards' widths count; beside a vertical one, the heights). */
+function organicLabelHints(
+  label: string,
+  source: { width: number; height: number } | undefined,
+  target: { width: number; height: number } | undefined,
+): { length: number; label: { width: number; height: number; offset: number } } {
+  const { width, height } = edgeLabelSize(label);
+  const sw = source?.width ?? DEFAULT_NODE_W, sh = source?.height ?? DEFAULT_NODE_H;
+  const tw = target?.width ?? DEFAULT_NODE_W, th = target?.height ?? DEFAULT_NODE_H;
+  const horizontal = (sw + tw) / 2 + width;
+  const vertical = (sh + th) / 2 + height;
+  const k = 2 / Math.PI;
+  const length = k * horizontal + (1 - k) * vertical + 2 * EDGE_LABEL_MARGIN;
+  return {
+    length,
+    label: {
+      width: width + 2 * EDGE_LABEL_MARGIN,
+      height: height + 2 * EDGE_LABEL_MARGIN,
+      offset: Math.min(80, length * DEFAULT_QUADRATIC_CURVATURE) / 2,
+    },
+  };
+}
+
 function GraphEdgeInternal({
   id,
   sourceId,
@@ -1299,9 +1327,14 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
         setClusterBoundaries(new Map());
         setRingGeometry([]);
       } else if (layout === "organic") {
+        // Labelled edges carry their label's padded footprint so the engine keeps the label clear
+        // of both cards and of the other labels at either endpoint (a hard post-condition of the
+        // overlap stage), plus a preferred length so the stress solve already aims for room
+        // between the cards; see organicLabelHints().
         const layoutEdges = (edges ?? []).map((e) => ({
           source: e.sourceId,
           target: e.targetId,
+          ...(e.label ? organicLabelHints(e.label, dims.get(e.sourceId), dims.get(e.targetId)) : {}),
         }));
         // organicLayout reads node x/y as a sketch only when at least 70% of nodes have
         // coordinates and the placed nodes already honor its post-conditions; nodes without
