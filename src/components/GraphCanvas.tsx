@@ -307,15 +307,17 @@ function GraphEdgeInternal({
   const result = useMemo(() => {
     // If this is a pre-routed navigation edge from batch routing, use that directly
     if (preRoutedEdge) {
-      const labelPos = label
-        ? findClearLabelPosition(
-            preRoutedEdge.points,
-            edgeLabelSize(label),
-            nodeRects,
-            EDGE_LABEL_MARGIN,
-            preRoutedEdge.isPolyline,
-          )
-        : preRoutedEdge.mid;
+      let labelPos = preRoutedEdge.mid;
+      if (label) {
+        // The route's own anchors first (orthogonal: straight-segment midpoints, longest first),
+        // taking the first that clears every node by the label margin; else the generic sampler.
+        const size = edgeLabelSize(label);
+        const halfW = size.width / 2 + EDGE_LABEL_MARGIN, halfH = size.height / 2 + EDGE_LABEL_MARGIN;
+        const clearAnchor = (preRoutedEdge.labelAnchors ?? []).find((p) =>
+          nodeRects.every((o) => Math.abs(p.x - o.x) >= halfW + o.width / 2 || Math.abs(p.y - o.y) >= halfH + o.height / 2),
+        );
+        labelPos = clearAnchor ?? findClearLabelPosition(preRoutedEdge.points, size, nodeRects, EDGE_LABEL_MARGIN, preRoutedEdge.isPolyline);
+      }
       return { ...preRoutedEdge, labelPos };
     }
 
@@ -1352,10 +1354,28 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
             ? { isPageNode: (id) => { const full = nodeById.get(id); return full ? safeIsPageNode(isPageNode, full) : true; } }
             : {},
         );
+        // Labels: each route offers anchors on its straight segments (longest first); take the
+        // first that keeps this label clear of the labels already placed, so two labels on
+        // parallel tracks 16 px apart stagger along the run instead of printing over each other.
         const routed = new Map<string, RoutedEdge>();
+        const placedLabels: Array<{ x: number; y: number; w: number; h: number }> = [];
+        const nodeBoxes = orthogonalNodes.map((n) => ({ ...positions.get(n.id)!, w: n.width, h: n.height }));
         engineEdges.forEach((e, i) => {
           const r = polylineToRoutedEdge(routes[i] ?? []);
-          if (r) routed.set(e.id, r);
+          if (!r) return;
+          if (e.label && r.labelAnchors?.length) {
+            const size = edgeLabelSize(e.label);
+            const apart = (p: { x: number; y: number }, o: { x: number; y: number; w: number; h: number }, margin: number) =>
+              Math.abs(p.x - o.x) >= (size.width + o.w) / 2 + margin || Math.abs(p.y - o.y) >= (size.height + o.h) / 2 + margin;
+            // Clear of every node by the label margin (what GraphEdgeInternal re-checks) and of
+            // every label placed so far; failing that, clear of the nodes at least.
+            const clearOfNodes = (p: { x: number; y: number }) => nodeBoxes.every((o) => apart(p, o, EDGE_LABEL_MARGIN));
+            const clear = (p: { x: number; y: number }) => clearOfNodes(p) && placedLabels.every((o) => apart(p, o, 2));
+            const pick = r.labelAnchors.find(clear) ?? r.labelAnchors.find(clearOfNodes) ?? r.labelAnchors[0];
+            r.labelAnchors = [pick, ...r.labelAnchors.filter((a) => a !== pick)];
+            placedLabels.push({ x: pick.x, y: pick.y, w: size.width, h: size.height });
+          }
+          routed.set(e.id, r);
         });
         setComputedPositions(positions);
         setComputedRoutes(routed);

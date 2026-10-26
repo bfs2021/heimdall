@@ -9,6 +9,10 @@ export interface RoutedEdge {
    *  BezierPathResult when sampling label positions — polylines use linear interpolation,
    *  while beziers use curve functions. */
   isPolyline: true
+  /** Label anchors in order of preference: the midpoint of each straight segment, longest first
+   *  (polylineToRoutedEdge). A renderer tries these before sampling the path by parameter, which
+   *  lands on a bend corner for an L-shaped route. */
+  labelAnchors?: Point[]
 }
 
 /** Default spacing (px) between parallel segments when nudging overlapping edges apart */
@@ -23,9 +27,17 @@ export function polylineToRoutedEdge(points: readonly Point[]): RoutedEdge | nul
   if (points.length < 2) return null
   const pts = points.map(p => ({ x: p.x, y: p.y }))
   const d = pointsToPathString(pts)
-  const mid = pts[Math.floor(pts.length / 2)]
+  // Label anchors: three points on every segment (its midpoint, then 30% and 70% along it),
+  // longest segment first (ties by segment order), so a label sits on a straight run instead of a
+  // corner and a renderer has alternatives when two labels would collide; `mid` (tooltips,
+  // popovers) is the longest segment's midpoint.
+  const labelAnchors = pts.slice(1)
+    .map((p, i) => ({ len: Math.abs(p.x - pts[i].x) + Math.abs(p.y - pts[i].y), a: pts[i], b: p, i }))
+    .sort((a, b) => b.len - a.len || a.i - b.i)
+    .flatMap(s => [0.5, 0.3, 0.7].map(t => ({ x: s.a.x + (s.b.x - s.a.x) * t, y: s.a.y + (s.b.y - s.a.y) * t })))
+  const mid = labelAnchors[0]
   const angle = Math.atan2(pts[pts.length - 1].y - pts[pts.length - 2].y, pts[pts.length - 1].x - pts[pts.length - 2].x)
-  return { d, mid, angle, points: pts, isPolyline: true }
+  return { d, mid, angle, points: pts, isPolyline: true, labelAnchors }
 }
 
 export function routeNavigationEdge(
