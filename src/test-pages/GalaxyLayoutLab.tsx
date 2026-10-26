@@ -47,9 +47,8 @@ export default function GalaxyLayoutLab() {
           nodes={GALAXY_BUDGET_NODES}
           edges={GALAXY_BUDGET_EDGES}
           layout="galaxy"
-          // galaxyLayout defaults nodeMargin to 0 (see its JSDoc) — this dataset's density is
-          // exactly the case that default exists to leave alone by default, so opt in here to
-          // demonstrate the fix: the closest pair goes from ~0px to 8px+ apart, still zero overlap.
+          // Replaces galaxy's own default gap (0.6 × the median body radius, at least 12 px) with a
+          // fixed 12 px, so this lab's spacing doesn't move when the sphere sizes are retuned.
           nodeMargin={12}
           fitView
           fitPadding={60}

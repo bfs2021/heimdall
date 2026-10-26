@@ -42,6 +42,9 @@ import VersionTimelineTestPage from './test-pages/VersionTimelineTestPage'
 import TraceViewerTestPage from './test-pages/TraceViewerTestPage'
 import UxNavigationTestPage from './test-pages/UxNavigationTestPage'
 import RadialTreeTestPage from './test-pages/RadialTreeTestPage'
+// Injected by vite.config.mjs from package.json (a JSON import here would pull package.json into
+// the declaration build and move every .d.ts under dist/src/).
+declare const __HEIMDALL_VERSION__: string
 
 export default function App() {
   const [selectedRows, setSelectedRows] = useState<(string | number)[]>([])
@@ -207,7 +210,7 @@ export default function App() {
 
   return (
     <ShellLayout
-      appTitle={{ title: 'Heimdall', version: 'v0.3.0' }}
+      appTitle={{ title: 'Heimdall', version: `v${__HEIMDALL_VERSION__}` }}
       topbar={{
         breadcrumbs: [
           { label: 'Dashboard' },
