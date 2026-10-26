@@ -39,6 +39,7 @@
     "test": "playwright test",
     "test:ui": "playwright test --ui",
     "test:unit": "vitest",
+    "check:skills": "node scripts/check-skill-coverage.mjs",
     "dev": "vite",
     "lint": "eslint src/ docs/src/ --ext .ts,.tsx",
     "setup": "node scripts/download-fonts.js"

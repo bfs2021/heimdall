@@ -39,6 +39,32 @@ npm test
 npm run test:ui
 ```
 
+### Agent skills
+
+The package ships `agent-skills/`: Claude Code skills that document every exported component (props with defaults, usage examples, gotchas) for coding agents building on Heimdall. Link them into a consumer project's `.claude/skills/` so they update with the package:
+
+```bash
+mkdir -p .claude/skills && for d in node_modules/@tinkermonkey/heimdall-ui/agent-skills/*; do ln -sfn "../../$d" ".claude/skills/$(basename "$d")"; done
+```
+
+| Skill | Covers |
+| ----- | ------ |
+| `heimdall-primitives` | Icon, Avatar, Button, Chip, Badge, StatusBadge, VersionPill, SegmentedControl |
+| `heimdall-inputs` | TextInput, TextArea, NumberInput, Select, TriState, Field, FilterDropdown, EntityPicker, KeyValueEditor, OrderedList, RelationshipBuilder |
+| `heimdall-data-display` | StatTile, StatGrid, Table, KVGrid, InspectorPanel, ResultCard, AssetCard, AssetGrid, MapCanvas |
+| `heimdall-navigation` | NavItem, Sidebar, Topbar, TabBar |
+| `heimdall-shell` | AppTitle, Titlebar, Statusbar, ShellLayout |
+| `heimdall-overlays` | Modal, ConfirmDialog, Toast, Tooltip, Popover, CommandPalette, WorkspaceSwitcherDialog, Drawer |
+| `heimdall-layout` | Panel, SplitPane, `useMediaQuery` |
+| `heimdall-charts` | ChartWrapper, Sparkline, LineChart, BarChart, BarV, BarH, StackedBar, Donut, Heatmap, StatusTimeline, ProgressBar, MetricRow |
+| `heimdall-page-patterns` | PageHeader, FilterBar, ActivityTimeline, AlertStrip, QuickAccessGrid, QuickAccessTile, ConfigTile, PipelineCard, FormCallout, RowMenu |
+| `heimdall-chat` | ChatMessage, ToolBlock, ThinkingBlock, ChatDivider, ChatSuggestions, ChatComposer, ChatContainer, ChatMarkdownContent |
+| `heimdall-graph` | GraphCanvas and its parts, the headless layout engines, HierarchyTree, DetailDrawer |
+| `heimdall-observability` | TraceViewer (with OTLP and X-Ray adapters), LogStream, DiffViewer, HashSetDiff, SideBySideDiff, VersionTimeline, LineageRail |
+| `heimdall-planning` | Calendar, MiniCalendar, KanbanBoard |
+
+`npm run check:skills` fails when an exported component or utility has no skill coverage, or when a props table names a prop the code doesn't have or leaves one out. The category list lives in `.claude/commands/refine-component-skills.md`.
+
 ### Project Structure
 
 ```

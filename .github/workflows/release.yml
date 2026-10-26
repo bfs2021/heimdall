@@ -21,6 +21,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Check agent skill coverage
+        run: npm run check:skills
+
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
