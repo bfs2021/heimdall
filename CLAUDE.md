@@ -166,7 +166,7 @@ Icon spec: Lucide-style outline, 24×24 viewBox, `strokeWidth={1.75}`, `currentC
 
 ## Layout Primitives
 
-- **`SplitPane`:** configurable two- or three-pane split (default: main content + 380px right pane)
+- **`SplitPane`:** two resizable panes (`first`, `second`), `direction` `'horizontal'` (default) or `'vertical'`. The split is a percentage: `initialSplitPercent` (default 50), or controlled with `splitPercent` + `onSplitChange`; it's clamped by `minSize`/`maxSize` in px (defaults 200/800). For a fixed-width side pane, use `DetailDrawer` or a flex layout instead.
 - **`Sidebar`:** 256px expanded, 64px collapsed (icons only)
 - **`StatGrid`:** 4-column grid, 14px gap; each `StatTile` has a 2px colored left bar
 - **`ShellLayout`:** composes `Sidebar` + `Topbar` + `Statusbar` into the full IDE chrome
