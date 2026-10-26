@@ -8,7 +8,11 @@ export interface UxNavLayoutOptions {
   viewFanGap?: number       // gap between page node and first view (default: ~40)
   viewSpacing?: number      // gap between adjacent views in a fan (default: ~20)
   trunkSpacing?: number     // gap between independent page trees (default: ~120)
+  maxRowWidth?: number      // a row of independent trees narrower than this never wraps (default: 1024)
 }
+
+/** Rows of independent trees are wrapped so the drawing approaches this width:height. */
+const ROW_TARGET_ASPECT = 1.6
 
 /**
  * Tree layout engine for ux-navigation layout mode. Positions page nodes as independent
@@ -19,6 +23,9 @@ export interface UxNavLayoutOptions {
  *          page nodes only (via isPageNode predicate)
  * Pass 2 — Page tree layout: For each independent page tree, use d3.tree() with nodeSize()
  *          configured for uniform spacing. Custom separation() accounts for view fan width.
+ * Pass 2b-2d — Blocks: each tree is measured box edge to box edge (fans included), views with no
+ *          page parent form one compact block, and the blocks are arranged in rows, trunkSpacing
+ *          apart, wrapping so the drawing approaches 16:10 once it is wider than maxRowWidth.
  * Pass 3 — View fan placement: For each page, position its child views horizontally to the right
  *
  * Multi-parent views: Views with multiple parents appear as separate node instances under each parent.
@@ -38,6 +45,7 @@ export function uxNavLayout(
     viewFanGap = 40,
     viewSpacing = 20,
     trunkSpacing = 120,
+    maxRowWidth = 1024,
   } = options
 
   const result = new Map<string, { x: number; y: number }>()
@@ -177,8 +185,17 @@ export function uxNavLayout(
     }
   }
 
-  // Pass 2b: Arrange multiple independent trees top-aligned by bounding box
-  let currentXOffset = 0
+  // Pass 2b: measure each independent tree as a block — box edge to box edge, view fans
+  // included — and prepare to translate it; where each block lands is decided in Pass 2d.
+  // (Trees used to be measured from the leftmost page's CENTRE, so every tree started half a
+  // page width further left than accounted for and the real gap was trunkSpacing - width/2:
+  // 51 px instead of 120 with the default 138 px node.)
+  interface LayoutBlock {
+    width: number
+    height: number
+    place: (left: number, top: number) => void
+  }
+  const blocks: LayoutBlock[] = []
 
   for (let i = 0; i < pageRoots.length; i++) {
     const rootId = pageRoots[i]
@@ -196,14 +213,10 @@ export function uxNavLayout(
     }
     collectTreeNodes(rootId)
 
-    // Compute tree extent in d3 coordinate space (before translation), box edge to box edge:
-    // the leftmost page's left edge to the rightmost page's right edge plus its view fan, so
-    // adjacent trees don't overlap and the gap between them is exactly trunkSpacing. (The left
-    // edge used to be the leftmost page's CENTRE, so every tree started half a page width
-    // further left than accounted for and the real gap was trunkSpacing - width/2: 51 px
-    // instead of 120 with the default 138 px node.)
     let minTreeExtent = bounds.minX
     let maxTreeExtent = bounds.maxX
+    let minTop = bounds.minY
+    let maxBottom = bounds.maxY
     for (const pageId of treeNodeIds) {
       const pos = pagePositions.get(pageId)
       if (pos) {
@@ -211,33 +224,29 @@ export function uxNavLayout(
         const fanWidth = getViewFanWidth(pageId)
         minTreeExtent = Math.min(minTreeExtent, pos.x - pageDim.width / 2)
         maxTreeExtent = Math.max(maxTreeExtent, pos.x + pageDim.width / 2 + fanWidth)
+        minTop = Math.min(minTop, pos.y - pageDim.height / 2)
+        maxBottom = Math.max(maxBottom, pos.y + pageDim.height / 2)
       }
     }
 
-    const treeWidth = maxTreeExtent - minTreeExtent
-
-    // Translate this tree's positions
-    const treeTranslateX = currentXOffset - minTreeExtent
-    const treeTranslateY = -bounds.minY // top-align all trees at y=0
-
-    // Apply translation to all page nodes in this tree
-    const updateTreePositions = (id: string) => {
-      if (pagePositions.has(id)) {
-        const pos = pagePositions.get(id)!
-        pagePositions.set(id, {
-          x: pos.x + treeTranslateX,
-          y: pos.y + treeTranslateY,
-        })
-      }
-      for (const childId of pageChildrenOf.get(id) ?? []) {
-        updateTreePositions(childId)
-      }
-    }
-
-    updateTreePositions(rootId)
-
-    // Update offset for next tree
-    currentXOffset += treeWidth + trunkSpacing
+    blocks.push({
+      width: maxTreeExtent - minTreeExtent,
+      height: maxBottom - minTop,
+      place: (left, top) => {
+        const treeTranslateX = left - minTreeExtent
+        const treeTranslateY = top - minTop
+        const updateTreePositions = (id: string) => {
+          if (pagePositions.has(id)) {
+            const pos = pagePositions.get(id)!
+            pagePositions.set(id, { x: pos.x + treeTranslateX, y: pos.y + treeTranslateY })
+          }
+          for (const childId of pageChildrenOf.get(id) ?? []) {
+            updateTreePositions(childId)
+          }
+        }
+        updateTreePositions(rootId)
+      },
+    })
   }
 
   // Pass 2c: Orphan views — views with no structural PAGE parent at all
@@ -249,9 +258,7 @@ export function uxNavLayout(
   // was previously never added to the returned position map at all, and the
   // caller (GraphCanvas) falls back to {x:0,y:0} for any node missing from
   // it, silently stacking every orphan view (and whatever real page/view
-  // happens to occupy the origin) on top of each other. Give each orphan
-  // view the same trunk-spaced treatment Pass 2b already gives an
-  // independent single-node page tree, appended in the same row after them.
+  // happens to occupy the origin) on top of each other.
   //
   // Must filter to pageIds.has(parentId) exactly like Pass 3 does below —
   // an earlier version of this filtered nothing, so a view-sourced
@@ -268,29 +275,60 @@ export function uxNavLayout(
   }
   const orphanViewIds = Array.from(viewIds).filter(id => !placedViewIds.has(id))
   if (orphanViewIds.length > 0) {
-    // Orphans form one compact block, trunkSpacing after the last tree, filled column by
-    // column and wrapped to the trees' height (at least one row; a graph with no page tree
-    // gets a roughly square block). They used to be appended one per trunk-spaced slot in a
-    // single row, which on real data (documentation_robotics_viewer's ux layer: 23 orphan views
-    // of 27) made a 5,800 px strip that dominated the bounding box — the vision statement's
-    // "aspect-ratio risk from Pass 2c's orphan row", measured at 4.9 px nodes after fit-to-view.
-    // The block uses viewSpacing between boxes, like a fan, so it still reads as a parking
-    // area for views rather than as a row of independent trees.
-    let treesHeight = 0
-    for (const [pageId, pos] of pagePositions) treesHeight = Math.max(treesHeight, pos.y + getNodeDim(pageId).height)
+    // Orphans form one compact block after the trees, filled column by column and wrapped to
+    // the tallest tree's height (at least one row; a graph with no page tree gets a roughly
+    // square block). They used to be appended one per trunk-spaced slot in a single row,
+    // which on real data (documentation_robotics_viewer's ux layer: 23 orphan views of 27)
+    // made a 5,800 px strip that dominated the bounding box — the vision statement's
+    // "aspect-ratio risk from Pass 2c's orphan row", measured at 4.9 px nodes after
+    // fit-to-view. The block uses viewSpacing between boxes, like a fan, so it still reads as
+    // a parking area for views rather than as a row of independent trees.
+    const tallestTree = blocks.reduce((h, b) => Math.max(h, b.height), 0)
     const orphanHeight = Math.max(...orphanViewIds.map(id => getNodeDim(id).height))
-    const rowsThatFit = Math.floor((treesHeight + viewSpacing) / (orphanHeight + viewSpacing))
-    const rows = Math.max(1, Math.min(orphanViewIds.length, pagePositions.size > 0 ? rowsThatFit : Math.ceil(Math.sqrt(orphanViewIds.length))))
-    let columnX = currentXOffset
-    for (let i = 0; i < orphanViewIds.length; i += rows) {
-      const column = orphanViewIds.slice(i, i + rows)
-      const columnWidth = Math.max(...column.map(id => getNodeDim(id).width))
-      column.forEach((viewId, row) => {
-        result.set(viewId, { x: columnX + columnWidth / 2, y: row * (orphanHeight + viewSpacing) })
-      })
-      columnX += columnWidth + viewSpacing
+    const rowsThatFit = Math.floor((tallestTree + viewSpacing) / (orphanHeight + viewSpacing))
+    const rows = Math.max(1, Math.min(orphanViewIds.length, blocks.length > 0 ? rowsThatFit : Math.ceil(Math.sqrt(orphanViewIds.length))))
+    const columns: string[][] = []
+    for (let i = 0; i < orphanViewIds.length; i += rows) columns.push(orphanViewIds.slice(i, i + rows))
+    const columnWidths = columns.map(column => Math.max(...column.map(id => getNodeDim(id).width)))
+    blocks.push({
+      width: columnWidths.reduce((a, b) => a + b, 0) + (columns.length - 1) * viewSpacing,
+      height: rows * orphanHeight + (rows - 1) * viewSpacing,
+      place: (left, top) => {
+        let columnX = left
+        columns.forEach((column, c) => {
+          column.forEach((viewId, row) => {
+            result.set(viewId, { x: columnX + columnWidths[c] / 2, y: top + orphanHeight / 2 + row * (orphanHeight + viewSpacing) })
+          })
+          columnX += columnWidths[c] + viewSpacing
+        })
+      },
+    })
+  }
+
+  // Pass 2d: arrange the blocks (independent trees, then the orphan block) in rows, left to
+  // right and top-aligned within a row, trunkSpacing apart in both directions. A row is as
+  // wide as the widest block, or wide enough that the whole drawing approaches a 16:10 shape
+  // (sqrt of the blocks' total area x 1.6), whichever is more — but never narrower than
+  // maxRowWidth, so a forest that fits a typical canvas at 1:1 stays on one row. Before, every
+  // block went on one row: a 39-node sitemap with two trees was 4,540 x 390 px (8.5 px node
+  // height after fit-to-view in 1280x800), and the vision statement's checklist item 6
+  // ("the overall aspect ratio stays reasonable even with many independent trees or orphan
+  // views") was an open risk.
+  const totalArea = blocks.reduce((a, b) => a + b.width * b.height, 0)
+  const widestBlock = blocks.reduce((w, b) => Math.max(w, b.width), 0)
+  const rowWidth = Math.max(widestBlock, maxRowWidth, Math.sqrt(totalArea * ROW_TARGET_ASPECT))
+  let rowLeft = 0
+  let rowTop = 0
+  let rowHeight = 0
+  for (const block of blocks) {
+    if (rowLeft > 0 && rowLeft + block.width > rowWidth) {
+      rowLeft = 0
+      rowTop += rowHeight + trunkSpacing
+      rowHeight = 0
     }
-    currentXOffset = columnX - viewSpacing + trunkSpacing
+    block.place(rowLeft, rowTop)
+    rowLeft += block.width + trunkSpacing
+    rowHeight = Math.max(rowHeight, block.height)
   }
 
   // Identify views with multiple parents
