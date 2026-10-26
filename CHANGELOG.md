@@ -4,6 +4,18 @@ All notable changes to `@tinkermonkey/heimdall-ui` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`agent-skills/heimdall-graph`** — brought up to date with 0.9.0. The skill now covers all
+  eight `GraphCanvas` layouts (what data each suits, the props it reads, and its limits; `organic`
+  and `orthogonal` are marked proof of concept), the hierarchy and collapse props,
+  `nodePopover` / `edgePopover` and the tooltip triggers, the `renderNode` fourth `props` argument
+  a custom renderer must wire for popovers, click tooltips and `aria-describedby`, the new
+  `GraphNode` props, and the headless `organicLayout`, `orthogonalLayout`, `radialTreeLayout`,
+  `uxNavLayout` and `galaxyLayout` functions.
+
 ## [0.9.0]
 
 Graph layout release: four new `GraphCanvas` layout engines (`organic`, `orthogonal`,
