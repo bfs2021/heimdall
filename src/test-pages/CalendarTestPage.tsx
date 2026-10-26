@@ -180,9 +180,13 @@ export default function CalendarTestPage() {
 
           <div style={{ display: 'flex', gap: '20px' }}>
             <div style={{ flex: 1, minWidth: 0 }}>
+              {/* Flex column so the Calendar stretches to the min-height. `height: 100%`
+                  on .calendar can't resolve against a min-height parent, and a separate
+                  host fill would show below short views (Day, Week) as a second surface. */}
               <div
                 style={{
-                  background: 'rgb(var(--canvas-surface))',
+                  display: 'flex',
+                  flexDirection: 'column',
                   border: '1px solid rgb(var(--canvas-border))',
                   borderRadius: 'var(--radius-md)',
                   overflow: 'hidden',
@@ -190,6 +194,7 @@ export default function CalendarTestPage() {
                 }}
               >
                 <Calendar
+                  style={{ flex: 1 }}
                   view={currentView}
                   focusedDate={focusedDate}
                   selectedDate={selectedDate}

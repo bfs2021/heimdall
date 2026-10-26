@@ -4,11 +4,11 @@ All notable changes to `@tinkermonkey/heimdall-ui` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.0]
 
 Graph layout release: four new `GraphCanvas` layout engines (`organic`, `orthogonal`,
 `radial-tree`, `ux-navigation`), a rewritten `galaxy`, a fixed `force-clustered`, and
-interactive popovers. The 0.8.1 entries below were never published, so they ship here.
+interactive popovers.
 
 ### Added
 
