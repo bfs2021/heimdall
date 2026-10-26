@@ -266,11 +266,31 @@ export function uxNavLayout(
       if (viewIds.has(id)) placedViewIds.add(id)
     }
   }
-  for (const viewId of viewIds) {
-    if (placedViewIds.has(viewId)) continue
-    const dim = getNodeDim(viewId)
-    result.set(viewId, { x: currentXOffset + dim.width / 2, y: 0 })
-    currentXOffset += dim.width + trunkSpacing
+  const orphanViewIds = Array.from(viewIds).filter(id => !placedViewIds.has(id))
+  if (orphanViewIds.length > 0) {
+    // Orphans form one compact block, trunkSpacing after the last tree, filled column by
+    // column and wrapped to the trees' height (at least one row; a graph with no page tree
+    // gets a roughly square block). They used to be appended one per trunk-spaced slot in a
+    // single row, which on real data (documentation_robotics_viewer's ux layer: 23 orphan views
+    // of 27) made a 5,800 px strip that dominated the bounding box — the vision statement's
+    // "aspect-ratio risk from Pass 2c's orphan row", measured at 4.9 px nodes after fit-to-view.
+    // The block uses viewSpacing between boxes, like a fan, so it still reads as a parking
+    // area for views rather than as a row of independent trees.
+    let treesHeight = 0
+    for (const [pageId, pos] of pagePositions) treesHeight = Math.max(treesHeight, pos.y + getNodeDim(pageId).height)
+    const orphanHeight = Math.max(...orphanViewIds.map(id => getNodeDim(id).height))
+    const rowsThatFit = Math.floor((treesHeight + viewSpacing) / (orphanHeight + viewSpacing))
+    const rows = Math.max(1, Math.min(orphanViewIds.length, pagePositions.size > 0 ? rowsThatFit : Math.ceil(Math.sqrt(orphanViewIds.length))))
+    let columnX = currentXOffset
+    for (let i = 0; i < orphanViewIds.length; i += rows) {
+      const column = orphanViewIds.slice(i, i + rows)
+      const columnWidth = Math.max(...column.map(id => getNodeDim(id).width))
+      column.forEach((viewId, row) => {
+        result.set(viewId, { x: columnX + columnWidth / 2, y: row * (orphanHeight + viewSpacing) })
+      })
+      columnX += columnWidth + viewSpacing
+    }
+    currentXOffset = columnX - viewSpacing + trunkSpacing
   }
 
   // Identify views with multiple parents
