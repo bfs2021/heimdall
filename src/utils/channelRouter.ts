@@ -355,6 +355,23 @@ function buildOrthogonalPath(
   for (const laneY of hLanes(obstacles)) candidates.push(hLanePath(laneY))
   for (const laneX of vLanes(obstacles)) candidates.push(vLanePath(laneX))
 
+  // Three-bend combinations of a horizontal and a vertical lane past every obstacle, for the
+  // case neither single lane clears (e.g. a target directly below another box, reached from a
+  // source whose row is full): up/down to the lane, across to the vertical lane, down/up to
+  // the target's row, and in from the side — or the mirrored order.
+  const laneYs = [...new Set([...hLanes(onHRun), ...hLanes(obstacles)])]
+  const laneXs = [...new Set([...vLanes(onVRun), ...vLanes(obstacles)])]
+  for (const laneY of laneYs) {
+    for (const laneX of laneXs) {
+      const exitV = portOn(source, vSide(source, { x: source.x, y: laneY }))
+      const entryH = portOn(target, hSide(target, { x: laneX, y: target.y }))
+      candidates.push([exitV, { x: exitV.x, y: laneY }, { x: laneX, y: laneY }, { x: laneX, y: entryH.y }, entryH])
+      const exitH = portOn(source, hSide(source, { x: laneX, y: source.y }))
+      const entryV = portOn(target, vSide(target, { x: target.x, y: laneY }))
+      candidates.push([exitH, { x: laneX, y: exitH.y }, { x: laneX, y: laneY }, { x: entryV.x, y: laneY }, entryV])
+    }
+  }
+
   let best: Point[] | null = null
   let bestHits = Infinity
   for (const candidate of candidates) {
