@@ -2575,8 +2575,15 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
                   // Galaxy: a structural edge is an orbit link — the geometry already says
                   // "contains" — so its label only shows when the edge or an end is in focus.
                   // Labels on every orbit link buried the bodies (the original charts draw none).
+                  // ux-navigation: the same rule — a page -> view fan edge is viewFanGap (40 px)
+                  // long and page -> child-page edges are the tree; fan position and depth
+                  // already say "contains". A label on every fan edge piles up on the sibling
+                  // views and the boxes (heimdall-layout-loop judge, 2026-10-26: critical
+                  // occlusion on the showcase data).
                   const edgeLabel =
-                    layout === "galaxy" && structural && !touchesFocus ? undefined : edge.label;
+                    (layout === "galaxy" || layout === "ux-navigation") && structural && !touchesFocus
+                      ? undefined
+                      : edge.label;
                   return (
                     <GraphEdgeInternal
                       key={edge.id}
