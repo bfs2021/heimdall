@@ -24,6 +24,7 @@ import ChatShowcase from './test-pages/ChatShowcase'
 import FormsShowcase from './test-pages/FormsShowcase'
 import GraphShowcase from './test-pages/GraphShowcase'
 import OrganicLayoutTestPage from './test-pages/OrganicLayoutTestPage'
+import OrthogonalLayoutTestPage from './test-pages/OrthogonalLayoutTestPage'
 import GalaxyLayoutLab from './test-pages/GalaxyLayoutLab'
 import CenterOnSelectTestPage from './test-pages/CenterOnSelectTestPage'
 import FullscreenContainerRefTestPage from './test-pages/FullscreenContainerRefTestPage'
@@ -130,6 +131,10 @@ export default function App() {
 
   if (exampleParam === 'organic-layout') {
     return <OrganicLayoutTestPage />
+  }
+
+  if (exampleParam === 'orthogonal-layout') {
+    return <OrthogonalLayoutTestPage />
   }
 
   if (exampleParam === 'center-on-select') {

@@ -1,5 +1,4 @@
 import { Delaunay } from 'd3-delaunay'
-import { packSiblings } from 'd3-hierarchy'
 import type { LayoutNode, LayoutEdge } from './graphLayout'
 
 /**
@@ -18,7 +17,8 @@ import type { LayoutNode, LayoutEdge } from './graphLayout'
  *   5. overlap removal: GTree-style growing tree over the Delaunay triangulation, looped until a
  *      pairwise scan finds no overlap, with a shape-preserving scale-up as the terminating
  *      fallback — so zero overlap and the minimum node distance are hard post-conditions.
- *   6. components packed with d3.packSiblings (cold start only).
+ *   6. components shelf-packed into a block of roughly the viewport's aspect, isolated nodes as
+ *      one grid block beneath them (cold start only).
  *   7. Procrustes alignment to the supplied positions (warm start with scope 'all').
  *
  * Warm start. Node x/y are the start positions. They are a *sketch* only when at least 70% of
@@ -37,6 +37,24 @@ import type { LayoutNode, LayoutEdge } from './graphLayout'
  * grows its tree from a pinned root, which never moves; a second pin in the same component can
  * still be displaced if the two pins conflict with the no-overlap post-condition, which wins.
  */
+/**
+ * An edge with optional layout hints:
+ *  - `length`: preferred center-to-center length in px, a floor on the ideal distance of its
+ *    endpoints in the stress solve (the longest wins when several edges join the same pair);
+ *  - `label`: the footprint (already padded by whatever margin the renderer keeps clear) of a label
+ *    drawn at the edge's midpoint, displaced `offset` px to the left of the source->target
+ *    direction when the renderer bows its edges. The overlap stage then guarantees, like node
+ *    separation, that the label clears every box in its component and the labels of the other
+ *    labelled edges at either endpoint — a hub's labels fan out instead of piling up.
+ */
+export interface OrganicLayoutEdge extends LayoutEdge {
+  length?: number
+  label?: { width: number; height: number; offset?: number }
+}
+
+/** A labelled edge inside one component: source/target indices, label box size and offset. */
+interface LabelHint { a: number; b: number; w: number; h: number; offset: number }
+
 export interface OrganicLayoutOptions {
   /** Ideal length of an edge in px (default 160). */
   preferredEdgeLength?: number
@@ -81,6 +99,17 @@ const POWER_ITERATIONS = 120
 const OVERLAP_MAX_PASSES = 50
 const SCALE_MAX_PASSES = 20
 const GROW_SLACK = 1.001
+// No single grow factor exceeds this per pass: a near-coincident pair would otherwise ask for a
+// hundredfold stretch at once (and an exactly coincident one for an infinite one), which cascades
+// through the tree into NaN. The loop re-checks, so a larger need is met over several passes.
+const GROW_CAP = 50
+// Cold solves nudge boxes off third-party labels (best effort) only this many passes, so the
+// remaining passes are the plain hard-constraint loop that is known to converge.
+const NUDGE_PASSES = 25
+// A star's leaves share one ring while the ring at the spoke length can hold them with room to
+// spare (up to four times its capacity, the overlap stage absorbs the rest); past that the leaves form
+// a halo: grid cells around the hub, filled by elliptical distance so the halo has the view's shape.
+const HALO_OVERFLOW = 4
 
 // ─── deterministic per-id helpers ────────────────────────────────────────────
 
@@ -113,14 +142,14 @@ function growFactor(a: Box, b: Box, gap: number): number {
   const rx = dx > 1e-9 ? ((a.w + b.w) / 2 + gap) / dx : Infinity
   const ry = dy > 1e-9 ? ((a.h + b.h) / 2 + gap) / dy : Infinity
   if (!(rx > 1 && ry > 1)) return 1
-  return Math.min(rx, ry) * GROW_SLACK
+  return Math.min(Math.min(rx, ry) * GROW_SLACK, GROW_CAP)
 }
 
 // ─── main ────────────────────────────────────────────────────────────────────
 
 export function organicLayout(
   nodes: readonly LayoutNode[],
-  edges: readonly LayoutEdge[],
+  edges: readonly OrganicLayoutEdge[],
   options: OrganicLayoutOptions = {},
 ): OrganicLayoutResult {
   const L = (options.preferredEdgeLength ?? 160) * (1.25 - 0.5 * Math.min(1, Math.max(0, options.compactness ?? 0.5)))
@@ -136,11 +165,20 @@ export function organicLayout(
   sorted.forEach((nd, i) => index.set(nd.id, i))
   const adj: number[][] = sorted.map(() => [])
   const seenPair = new Set<string>()
+  // Preferred lengths and label boxes per unordered pair (the longest / largest when edges repeat).
+  const pairLength = new Map<string, number>()
+  // Labels are kept per direction: an A->B and a B->A edge draw two labels, bowed to opposite sides.
+  const pairLabel = new Map<string, LabelHint>()
   for (const e of edges) {
     const a = index.get(e.source)
     const b = index.get(e.target)
     if (a === undefined || b === undefined || a === b) continue
     const key = a < b ? `${a}|${b}` : `${b}|${a}`
+    if (Number.isFinite(e.length) && (e.length as number) > 0) pairLength.set(key, Math.max(pairLength.get(key) ?? 0, e.length as number))
+    if (e.label && e.label.width > 0 && e.label.height > 0) {
+      const prev = pairLabel.get(`${a}>${b}`)
+      pairLabel.set(`${a}>${b}`, { a, b, w: Math.max(prev?.w ?? 0, e.label.width), h: Math.max(prev?.h ?? 0, e.label.height), offset: Math.max(prev?.offset ?? 0, e.label.offset ?? 0) })
+    }
     if (seenPair.has(key)) continue
     seenPair.add(key)
     adj[a].push(b)
@@ -178,7 +216,9 @@ export function organicLayout(
   // Warm start detection: a sketch is a (mostly) positioned layout that already honors the
   // post-conditions. Anything else (NaN coordinates, overlaps, a circle seed) is solved cold.
   const scope = options.scope ?? 'auto'
-  const valid = mostPositioned && !anyTooClose(boxes.filter((_, i) => positioned[i]), gap)
+  const labels = [...pairLabel.values()].sort((p, q) => p.a - q.a || p.b - q.b)
+  const placedLabels = labels.filter(l => positioned[l.a] && positioned[l.b])
+  const valid = mostPositioned && !anyTooClose(boxes.filter((_, i) => positioned[i]), gap) && labelViolations(placedLabels, boxes, pos).length === 0
   const warm = mostPositioned && (scope === 'auto' ? valid : true)
   const stats: OrganicLayoutStats = { iterations: 0, overlapIterations: 0, scaledUp: 0, components: components.length, warmStart: warm, solvedNodes: 0 }
   const pinned = sorted.map((nd, i) => Boolean(nd.pinned) && positioned[i])
@@ -203,7 +243,7 @@ export function organicLayout(
   // Stages 1–3 per component (lockstep sweeps so the total stress history is monotone).
   const solvers = components
     .filter(m => m.length > 1)
-    .map(m => buildComponentSolver(m, adj, sorted, pos, movable, L, gap))
+    .map(m => buildComponentSolver(m, adj, sorted, pos, movable, L, gap, pairLength))
 
   if (!warm) {
     // Cold start: MDS per component, then each component's frame anchored onto its pins (or
@@ -265,10 +305,12 @@ export function organicLayout(
 
   // Stage 5 — overlap removal, guaranteed, per component.
   syncBoxes()
-  for (const m of components) {
-    if (m.length < 2) continue
-    removeOverlaps(m, boxes, pos, sorted, pinned, gap, stats)
-  }
+  const inComponent = new Map<number, LabelHint[]>()
+  for (const l of labels) { const c = compOf[l.a]; (inComponent.get(c) ?? inComponent.set(c, []).get(c)!).push(l) }
+  components.forEach((m, c) => {
+    if (m.length < 2) return
+    removeOverlaps(m, boxes, pos, sorted, pinned, gap, stats, inComponent.get(c) ?? [], !warm)
+  })
   syncBoxes()
 
   // Stage 6 — pack components (cold only; a sketch keeps its arrangement).
@@ -277,7 +319,7 @@ export function organicLayout(
     syncBoxes()
     // New nodes placed into a sketch, or components anchored by pins, can still collide across
     // components: one global pass over everything.
-    if (anyTooClose(boxes, gap)) removeOverlaps(components.flat(), boxes, pos, sorted, pinned, gap, stats)
+    if (anyTooClose(boxes, gap) || labelViolations(labels, boxes, pos).length) removeOverlaps(components.flat(), boxes, pos, sorted, pinned, gap, stats, labels)
   }
 
   const positions = new Map<string, Pt>()
@@ -302,6 +344,7 @@ function buildComponentSolver(
   movable: Uint8Array,
   L: number,
   gap: number,
+  pairLength: ReadonlyMap<string, number>,
 ): ComponentSolver {
   const m = members.length
   const local = new Map<number, number>()
@@ -328,8 +371,12 @@ function buildComponentSolver(
     const na = nodes[members[a]], nb = nodes[members[b]]
     return Math.hypot((na.width + nb.width) / 2, (na.height + nb.height) / 2) + gap
   }
+  const preferred = (a: number, b: number) => {
+    const ga = members[a], gb = members[b]
+    return pairLength.get(ga < gb ? `${ga}|${gb}` : `${gb}|${ga}`) ?? 0
+  }
   for (let a = 0; a < m; a++) for (const b of nbrs[a]) if (a < b) {
-    const f = Math.max(d[a * m + b], sep(a, b))
+    const f = Math.max(d[a * m + b], sep(a, b), preferred(a, b))
     d[a * m + b] = f; d[b * m + a] = f
   }
   // Stage 4 — stars: leaves of one hub (>= 3 leaves) sit on a ring instead of a stress clump.
@@ -337,10 +384,27 @@ function buildComponentSolver(
   // hop-2 ideal (2L), not L. Capping at L pulls every star's leaves inside their hop distance and
   // raised scale-fitted stress on real/miserables (many stars) from 0.129 to 0.142, past the
   // Stage 1 gate's 0.132; the cap only matters for k <= 6 anyway.
+  // A star whose spokes carry preferred lengths (edge labels) puts its leaves on a ring of that
+  // radius, so the leaves spread with the spokes instead of bunching at the shorter chord.
+  // A star with far more leaves than its ring can hold (pathological/star: 400) gets a halo
+  // instead: the ideal distances among hub and leaves are those of a canonical halo layout, which
+  // is exactly embeddable, so MDS reproduces it and the solve keeps it (vision item D4).
   for (let hub = 0; hub < m; hub++) {
     const leaves = nbrs[hub].filter(v => nbrs[v].length === 1)
     if (leaves.length < 3) continue
-    const ring = Math.max(0, Math.min(2 * L, 2 * L * Math.sin(Math.PI / leaves.length)))
+    const r = Math.max(L, ...leaves.map(v => preferred(hub, v)))
+    const chord = Math.min(...leaves.map(v => sep(hub, v)))
+    const capacity = Math.floor((2 * Math.PI * r) / chord)
+    if (leaves.length > HALO_OVERFLOW * capacity) {
+      const halo = haloPositions(leaves.length, [hub, ...leaves].map(i => nodes[members[i]]), gap)
+      const star = [hub, ...leaves]
+      for (let i = 0; i < star.length; i++) for (let j = i + 1; j < star.length; j++) {
+        const f = Math.hypot(halo[i].x - halo[j].x, halo[i].y - halo[j].y)
+        d[star[i] * m + star[j]] = f; d[star[j] * m + star[i]] = f
+      }
+      continue
+    }
+    const ring = Math.max(0, Math.min(2 * r, 2 * r * Math.sin(Math.PI / leaves.length)))
     for (let i = 0; i < leaves.length; i++) for (let j = i + 1; j < leaves.length; j++) {
       const a = leaves[i], b = leaves[j]
       const f = Math.max(ring, sep(a, b))
@@ -401,6 +465,25 @@ function buildComponentSolver(
       return s
     },
   }
+}
+
+/**
+ * Canonical halo for a hub with `k` leaves: the hub at the origin of a grid whose cell is the
+ * largest box plus the gap, and the leaves in the `k` cells nearest the hub by elliptical
+ * distance (PACK_ASPECT wide), so the filled region has the view's shape. Returns hub first.
+ */
+function haloPositions(k: number, star: readonly LayoutNode[], gap: number): Pt[] {
+  const cw = Math.max(...star.map(n => n.width)) + gap + 0.5
+  const ch = Math.max(...star.map(n => n.height)) + gap + 0.5
+  const R = Math.ceil(2 * Math.sqrt(k)) + 2
+  const cells: Array<{ x: number; y: number; d: number; a: number }> = []
+  for (let i = -R; i <= R; i++) for (let j = -R; j <= R; j++) {
+    if (i === 0 && j === 0) continue
+    const x = i * cw, y = j * ch
+    cells.push({ x, y, d: (x / PACK_ASPECT) ** 2 + y * y, a: Math.atan2(y, x) })
+  }
+  cells.sort((p, q) => p.d - q.d || p.a - q.a)
+  return [{ x: 0, y: 0 }, ...cells.slice(0, k).map(c => ({ x: c.x, y: c.y }))]
 }
 
 // ─── initial positions ───────────────────────────────────────────────────────
@@ -542,7 +625,70 @@ function proximityEdges(members: number[], boxes: Box[]): Array<[number, number]
   return out
 }
 
-function removeOverlaps(members: number[], boxes: Box[], pos: Pt[], nodes: readonly LayoutNode[], pinned: boolean[], gap: number, stats: OrganicLayoutStats): void {
+/** The label box of a labelled edge: the straight midpoint of its endpoints, displaced `offset` px
+ *  to the left of the source->target direction (where a bowed edge carries its midpoint). */
+function labelBox(l: LabelHint, pos: Pt[]): Box {
+  const dx = pos[l.b].x - pos[l.a].x, dy = pos[l.b].y - pos[l.a].y
+  const dist = Math.hypot(dx, dy) || 1
+  return { x: (pos[l.a].x + pos[l.b].x) / 2 - (dy / dist) * l.offset, y: (pos[l.a].y + pos[l.b].y) / 2 + (dx / dist) * l.offset, w: l.w, h: l.h }
+}
+
+/**
+ * Label post-conditions, as pairs that must grow apart: a label overlapping one of its own
+ * endpoint boxes grows that edge; two labels at a shared endpoint overlapping each other grow the
+ * distance between their far endpoints (both midpoints move with it, the shared endpoint does
+ * not). Growing the edge by `t` grows the label's distance from the endpoint by the same `t`,
+ * so the factors are exactly those of the ordinary box pairs.
+ */
+function labelViolations(labels: readonly LabelHint[], boxes: Box[], pos: Pt[]): Array<{ a: number; b: number; t: number }> {
+  const out: Array<{ a: number; b: number; t: number }> = []
+  const lb = labels.map(l => labelBox(l, pos))
+  const atNode = new Map<number, number[]>()
+  const pair = (a: number, b: number, t: number) => out.push({ a: Math.min(a, b), b: Math.max(a, b), t })
+  labels.forEach((l, i) => {
+    for (const end of [l.a, l.b]) {
+      if (tooClose(boxes[end], lb[i], 0)) pair(l.a, l.b, growFactor(boxes[end], lb[i], 0))
+      ;(atNode.get(end) ?? atNode.set(end, []).get(end)!).push(i)
+    }
+  })
+  for (const [u, idx] of atNode) {
+    for (let i = 0; i < idx.length; i++) for (let j = i + 1; j < idx.length; j++) {
+      const li = labels[idx[i]], lj = labels[idx[j]]
+      const vi = li.a === u ? li.b : li.a
+      const vj = lj.a === u ? lj.b : lj.a
+      if (vi === vj || !tooClose(lb[idx[i]], lb[idx[j]], 0)) continue
+      pair(vi, vj, growFactor(lb[idx[i]], lb[idx[j]], 0))
+    }
+  }
+  return out
+}
+
+/**
+ * Best effort, not a post-condition: a box that is neither endpoint of a labelled edge but sits
+ * on that edge's label is nudged off it along the axis of least penetration (a renderer that
+ * steers labels away from boxes would otherwise slide the label along its edge and back into a
+ * sibling label). Growing a tree edge for this instead stretches the whole drawing, so the nudge
+ * is a plain translation; the ordinary overlap pass that follows repairs any box overlap it
+ * causes, and the loop re-checks. Pinned boxes are left alone. Returns how many boxes moved.
+ */
+function nudgeOffLabels(labels: readonly LabelHint[], members: readonly number[], boxes: Box[], pos: Pt[], pinned: boolean[]): number {
+  let moved = 0
+  for (const l of labels) {
+    const lb = labelBox(l, pos)
+    for (const c of members) {
+      if (c === l.a || c === l.b || pinned[c] || !tooClose(boxes[c], lb, 0)) continue
+      const px = (boxes[c].w + lb.w) / 2 - Math.abs(boxes[c].x - lb.x) + 0.5
+      const py = (boxes[c].h + lb.h) / 2 - Math.abs(boxes[c].y - lb.y) + 0.5
+      if (px < py) pos[c].x += boxes[c].x >= lb.x ? px : -px
+      else pos[c].y += boxes[c].y >= lb.y ? py : -py
+      boxes[c].x = pos[c].x; boxes[c].y = pos[c].y
+      moved++
+    }
+  }
+  return moved
+}
+
+function removeOverlaps(members: number[], boxes: Box[], pos: Pt[], nodes: readonly LayoutNode[], pinned: boolean[], gap: number, stats: OrganicLayoutStats, labels: readonly LabelHint[] = [], nudge = false): void {
   const sync = () => members.forEach(g => { boxes[g].x = pos[g].x; boxes[g].y = pos[g].y })
   // Coincident centers have no direction to grow along (growFactor would be infinite): nudge
   // them apart deterministically. Run before every pass, since a grow pass can create new ones.
@@ -559,18 +705,24 @@ function removeOverlaps(members: number[], boxes: Box[], pos: Pt[], nodes: reado
   }
   for (let pass = 0; pass < OVERLAP_MAX_PASSES; pass++) {
     separateCoincident()
+    const nudged = nudge && pass < NUDGE_PASSES ? nudgeOffLabels(labels, members, boxes, pos, pinned) : 0
     const overlapping: Array<[number, number]> = []
     for (let i = 0; i < members.length; i++) for (let j = i + 1; j < members.length; j++) {
       if (tooClose(boxes[members[i]], boxes[members[j]], gap)) overlapping.push([members[i], members[j]])
     }
-    if (overlapping.length === 0) return
+    const labelPairs = labelViolations(labels, boxes, pos)
+    if (overlapping.length === 0 && labelPairs.length === 0) { if (nudged === 0) return; continue }
     stats.overlapIterations++
     // Candidate tree edges: Delaunay edges plus every overlapping pair (wide boxes can overlap
-    // without being Delaunay-adjacent). Heaviest overlaps enter the tree first.
+    // without being Delaunay-adjacent) and every label pair that must grow. Heaviest overlaps
+    // enter the tree first.
     const cand = proximityEdges(members, boxes)
     const seen = new Set(cand.map(([a, b]) => `${a}|${b}`))
-    for (const [a, b] of overlapping) if (!seen.has(`${a}|${b}`)) cand.push([a, b])
-    const weighted = cand.map(([a, b]) => ({ a, b, t: growFactor(boxes[a], boxes[b], gap) }))
+    for (const [a, b] of overlapping) if (!seen.has(`${a}|${b}`)) { seen.add(`${a}|${b}`); cand.push([a, b]) }
+    for (const { a, b } of labelPairs) if (!seen.has(`${a}|${b}`)) { seen.add(`${a}|${b}`); cand.push([a, b]) }
+    const needed = new Map<string, number>()
+    for (const { a, b, t } of labelPairs) needed.set(`${a}|${b}`, Math.max(needed.get(`${a}|${b}`) ?? 1, t))
+    const weighted = cand.map(([a, b]) => ({ a, b, t: Math.max(growFactor(boxes[a], boxes[b], gap), needed.get(`${a}|${b}`) ?? 1) }))
     weighted.sort((p, q) => q.t - p.t || p.a - q.a || p.b - q.b)
     // Kruskal.
     const parent = new Map<number, number>(members.map(g => [g, g]))
@@ -614,6 +766,7 @@ function removeOverlaps(members: number[], boxes: Box[], pos: Pt[], nodes: reado
     separateCoincident()
     let t = 1
     for (let i = 0; i < members.length; i++) for (let j = i + 1; j < members.length; j++) t = Math.max(t, growFactor(boxes[members[i]], boxes[members[j]], gap))
+    for (const v of labelViolations(labels, boxes, pos)) t = Math.max(t, v.t)
     if (t <= 1) return
     stats.scaledUp++
     const anchor = members.find(g => pinned[g])
@@ -637,28 +790,99 @@ function bbox(boxes: Box[]): { cx: number; cy: number; w: number; h: number } {
   return { cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, w: maxX - minX, h: maxY - minY }
 }
 
+// Viewport aspect the component packing targets (GraphCanvas fits the whole layout to the view,
+// so the packed arrangement should have roughly the view's shape, not a disc's).
+const PACK_ASPECT = 1.6
+
+/** Shelf-pack rectangles (largest first) into rows no wider than `maxW`; returns row-relative offsets. */
+function shelfPack(rects: Array<{ w: number; h: number }>, maxW: number, pad: number): { offsets: Pt[]; w: number; h: number } {
+  const offsets: Pt[] = rects.map(() => ({ x: 0, y: 0 }))
+  const rows: Array<{ items: number[]; w: number; h: number }> = []
+  rects.forEach((r, i) => {
+    const row = rows[rows.length - 1]
+    if (row && row.w + pad + r.w <= maxW) {
+      offsets[i] = { x: row.w + pad, y: 0 }
+      row.items.push(i); row.w += pad + r.w; row.h = Math.max(row.h, r.h)
+    } else {
+      rows.push({ items: [i], w: r.w, h: r.h })
+      offsets[i] = { x: 0, y: 0 }
+    }
+  })
+  const totalW = Math.max(...rows.map(r => r.w))
+  let y = 0
+  for (const row of rows) {
+    const inset = (totalW - row.w) / 2 // rows are centered, so the block reads as one shape
+    for (const i of row.items) { offsets[i].x += inset; offsets[i].y = y + (row.h - rects[i].h) / 2 }
+    y += row.h + pad
+  }
+  return { offsets, w: totalW, h: y - pad }
+}
+
+/**
+ * Stage 6: cold-start component arrangement. Connected components are shelf-packed as
+ * rectangles into a block of roughly PACK_ASPECT shape (largest first, rows centered), and
+ * isolated nodes form one compact grid block beneath them (vision item 13) instead of orbiting
+ * the main component as circle-packed singletons. Components anchored by a pinned node keep
+ * their absolute place; the packed block sits to their right when the two would collide.
+ */
 function packComponents(components: number[][], boxes: Box[], pos: Pt[], pinned: boolean[], gap: number, spacing: number): void {
   const anchored = components.filter(m => m.some(i => pinned[i]))
   const free = components.filter(m => !m.some(i => pinned[i]))
   if (free.length === 0) return
   const pad = Math.max(gap, spacing)
-  if (free.length === 1 && anchored.length === 0) {
-    const bb = bbox(free[0].map(g => boxes[g]))
-    for (const g of free[0]) { pos[g].x -= bb.cx; pos[g].y -= bb.cy }
-    return
+  const multi = free.filter(m => m.length > 1)
+  const singles = free.filter(m => m.length === 1).map(m => m[0])
+  const moveTo = (members: number[], bb: { cx: number; cy: number }, x: number, y: number) => {
+    for (const g of members) { pos[g].x += x - bb.cx; pos[g].y += y - bb.cy }
   }
-  const circles = free.map((m, i) => {
-    const bb = bbox(m.map(g => boxes[g]))
-    return { i, bb, r: Math.hypot(bb.w, bb.h) / 2 + pad / 2, x: 0, y: 0 }
-  })
-  circles.sort((a, b) => b.r - a.r || a.i - b.i)
-  packSiblings(circles)
-  for (const c of circles) for (const g of free[c.i]) { pos[g].x += c.x - c.bb.cx; pos[g].y += c.y - c.bb.cy }
-  if (anchored.length === 0) return
-  // Components anchored by pins keep their absolute place; the packed group sits to their right
-  // when the two would otherwise collide.
-  const anchoredBb = bbox(anchored.flat().map(g => boxes[g]))
+
+  // Connected components: rectangles, tallest first (ties by width, then by the component's
+  // lowest member index — components are already in deterministic id order).
+  const rects = multi.map((m, i) => { const bb = bbox(m.map(g => boxes[g])); return { i, m, bb, w: bb.w, h: bb.h } })
+  rects.sort((a, b) => b.h - a.h || b.w - a.w || a.i - b.i)
+  let blockW = 0, blockH = 0
+  if (rects.length) {
+    const area = rects.reduce((s, r) => s + (r.w + pad) * (r.h + pad), 0)
+    const widest = Math.max(...rects.map(r => r.w))
+    // Try a few target widths around the aspect-ideal one and keep the arrangement that fits a
+    // PACK_ASPECT view best (largest common scale), ties to the narrower target.
+    let best: { offsets: Pt[]; w: number; h: number } | undefined
+    let bestScore = -Infinity
+    for (const f of [0.75, 1, 1.25, 1.5, 2]) {
+      const packed = shelfPack(rects, Math.max(widest, Math.sqrt(area * PACK_ASPECT) * f), pad)
+      const score = Math.min(PACK_ASPECT / packed.w, 1 / packed.h)
+      if (score > bestScore + 1e-12) { bestScore = score; best = packed }
+    }
+    const { offsets, w, h } = best!
+    rects.forEach((r, i) => moveTo(r.m, r.bb, offsets[i].x + r.w / 2, offsets[i].y + r.h / 2))
+    blockW = w; blockH = h
+  }
+
+  // Isolated nodes: one grid block below the components, as wide as they are (or, with no
+  // connected component, a block of PACK_ASPECT shape on its own).
+  if (singles.length) {
+    const cellW = Math.max(...singles.map(g => boxes[g].w)) + pad
+    const cellH = Math.max(...singles.map(g => boxes[g].h)) + pad
+    const cols = rects.length
+      ? Math.max(1, Math.min(singles.length, Math.floor((blockW + pad) / cellW)))
+      : Math.max(1, Math.min(singles.length, Math.ceil(Math.sqrt((singles.length * PACK_ASPECT * cellH) / cellW))))
+    const rows = Math.ceil(singles.length / cols)
+    const gridW = cols * cellW - pad
+    const y0 = rects.length ? blockH + pad : 0
+    singles.forEach((g, k) => {
+      const col = k % cols, row = Math.floor(k / cols)
+      pos[g].x = (blockW - gridW) / 2 + col * cellW + (cellW - pad) / 2
+      pos[g].y = y0 + row * cellH + (cellH - pad) / 2
+    })
+    blockW = Math.max(blockW, gridW)
+    blockH = y0 + rows * cellH - pad
+  }
+
+  // Center the whole packed block on the origin.
   const packed = free.flat()
+  for (const g of packed) { pos[g].x -= blockW / 2; pos[g].y -= blockH / 2 }
+  if (anchored.length === 0) return
+  const anchoredBb = bbox(anchored.flat().map(g => boxes[g]))
   const packedBb = bbox(packed.map(g => ({ ...boxes[g], x: pos[g].x, y: pos[g].y })))
   const overlapX = Math.abs(packedBb.cx - anchoredBb.cx) < (packedBb.w + anchoredBb.w) / 2 + pad
   const overlapY = Math.abs(packedBb.cy - anchoredBb.cy) < (packedBb.h + anchoredBb.h) / 2 + pad

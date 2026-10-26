@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { routeNavigationEdge, routeNavigationEdges } from './channelRouter'
+import { polylineToRoutedEdge, routeNavigationEdge, routeNavigationEdges } from './channelRouter'
 import type { EdgeEndpointRect } from './graph'
 
 describe('channelRouter', () => {
@@ -168,5 +168,18 @@ describe('channelRouter', () => {
       expect(parts[0]).toBe('M')
       expect(parts.length).toBeGreaterThanOrEqual(5) // At least M x y L x y
     })
+  })
+})
+
+describe('polylineToRoutedEdge', () => {
+  it('anchors the label on the longest straight segment, never on a bend corner', () => {
+    // An L: a short 20 px stub, then a 200 px run.
+    const r = polylineToRoutedEdge([{ x: 0, y: 0 }, { x: 0, y: 20 }, { x: 200, y: 20 }])!
+    expect(r.labelAnchors![0]).toEqual({ x: 100, y: 20 })
+    expect(r.mid).toEqual({ x: 100, y: 20 })
+    expect(r.labelAnchors!.slice(1, 3)).toEqual([{ x: 60, y: 20 }, { x: 140, y: 20 }])
+    expect(r.labelAnchors).toHaveLength(6)
+    expect(r.d.startsWith('M')).toBe(true)
+    expect(polylineToRoutedEdge([{ x: 0, y: 0 }])).toBeNull()
   })
 })
