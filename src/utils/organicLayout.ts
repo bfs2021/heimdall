@@ -37,6 +37,24 @@ import type { LayoutNode, LayoutEdge } from './graphLayout'
  * grows its tree from a pinned root, which never moves; a second pin in the same component can
  * still be displaced if the two pins conflict with the no-overlap post-condition, which wins.
  */
+/**
+ * An edge with optional layout hints:
+ *  - `length`: preferred center-to-center length in px, a floor on the ideal distance of its
+ *    endpoints in the stress solve (the longest wins when several edges join the same pair);
+ *  - `label`: the footprint (already padded by whatever margin the renderer keeps clear) of a label
+ *    drawn at the edge's midpoint, displaced `offset` px to the left of the source->target
+ *    direction when the renderer bows its edges. The overlap stage then guarantees, like node
+ *    separation, that the label clears every box in its component and the labels of the other
+ *    labelled edges at either endpoint — a hub's labels fan out instead of piling up.
+ */
+export interface OrganicLayoutEdge extends LayoutEdge {
+  length?: number
+  label?: { width: number; height: number; offset?: number }
+}
+
+/** A labelled edge inside one component: source/target indices, label box size and offset. */
+interface LabelHint { a: number; b: number; w: number; h: number; offset: number }
+
 export interface OrganicLayoutOptions {
   /** Ideal length of an edge in px (default 160). */
   preferredEdgeLength?: number
@@ -81,6 +99,13 @@ const POWER_ITERATIONS = 120
 const OVERLAP_MAX_PASSES = 50
 const SCALE_MAX_PASSES = 20
 const GROW_SLACK = 1.001
+// No single grow factor exceeds this per pass: a near-coincident pair would otherwise ask for a
+// hundredfold stretch at once (and an exactly coincident one for an infinite one), which cascades
+// through the tree into NaN. The loop re-checks, so a larger need is met over several passes.
+const GROW_CAP = 50
+// Cold solves nudge boxes off third-party labels (best effort) only this many passes, so the
+// remaining passes are the plain hard-constraint loop that is known to converge.
+const NUDGE_PASSES = 25
 
 // ─── deterministic per-id helpers ────────────────────────────────────────────
 
@@ -113,14 +138,14 @@ function growFactor(a: Box, b: Box, gap: number): number {
   const rx = dx > 1e-9 ? ((a.w + b.w) / 2 + gap) / dx : Infinity
   const ry = dy > 1e-9 ? ((a.h + b.h) / 2 + gap) / dy : Infinity
   if (!(rx > 1 && ry > 1)) return 1
-  return Math.min(rx, ry) * GROW_SLACK
+  return Math.min(Math.min(rx, ry) * GROW_SLACK, GROW_CAP)
 }
 
 // ─── main ────────────────────────────────────────────────────────────────────
 
 export function organicLayout(
   nodes: readonly LayoutNode[],
-  edges: readonly LayoutEdge[],
+  edges: readonly OrganicLayoutEdge[],
   options: OrganicLayoutOptions = {},
 ): OrganicLayoutResult {
   const L = (options.preferredEdgeLength ?? 160) * (1.25 - 0.5 * Math.min(1, Math.max(0, options.compactness ?? 0.5)))
@@ -136,11 +161,20 @@ export function organicLayout(
   sorted.forEach((nd, i) => index.set(nd.id, i))
   const adj: number[][] = sorted.map(() => [])
   const seenPair = new Set<string>()
+  // Preferred lengths and label boxes per unordered pair (the longest / largest when edges repeat).
+  const pairLength = new Map<string, number>()
+  // Labels are kept per direction: an A->B and a B->A edge draw two labels, bowed to opposite sides.
+  const pairLabel = new Map<string, LabelHint>()
   for (const e of edges) {
     const a = index.get(e.source)
     const b = index.get(e.target)
     if (a === undefined || b === undefined || a === b) continue
     const key = a < b ? `${a}|${b}` : `${b}|${a}`
+    if (Number.isFinite(e.length) && (e.length as number) > 0) pairLength.set(key, Math.max(pairLength.get(key) ?? 0, e.length as number))
+    if (e.label && e.label.width > 0 && e.label.height > 0) {
+      const prev = pairLabel.get(`${a}>${b}`)
+      pairLabel.set(`${a}>${b}`, { a, b, w: Math.max(prev?.w ?? 0, e.label.width), h: Math.max(prev?.h ?? 0, e.label.height), offset: Math.max(prev?.offset ?? 0, e.label.offset ?? 0) })
+    }
     if (seenPair.has(key)) continue
     seenPair.add(key)
     adj[a].push(b)
@@ -178,7 +212,9 @@ export function organicLayout(
   // Warm start detection: a sketch is a (mostly) positioned layout that already honors the
   // post-conditions. Anything else (NaN coordinates, overlaps, a circle seed) is solved cold.
   const scope = options.scope ?? 'auto'
-  const valid = mostPositioned && !anyTooClose(boxes.filter((_, i) => positioned[i]), gap)
+  const labels = [...pairLabel.values()].sort((p, q) => p.a - q.a || p.b - q.b)
+  const placedLabels = labels.filter(l => positioned[l.a] && positioned[l.b])
+  const valid = mostPositioned && !anyTooClose(boxes.filter((_, i) => positioned[i]), gap) && labelViolations(placedLabels, boxes, pos).length === 0
   const warm = mostPositioned && (scope === 'auto' ? valid : true)
   const stats: OrganicLayoutStats = { iterations: 0, overlapIterations: 0, scaledUp: 0, components: components.length, warmStart: warm, solvedNodes: 0 }
   const pinned = sorted.map((nd, i) => Boolean(nd.pinned) && positioned[i])
@@ -203,7 +239,7 @@ export function organicLayout(
   // Stages 1–3 per component (lockstep sweeps so the total stress history is monotone).
   const solvers = components
     .filter(m => m.length > 1)
-    .map(m => buildComponentSolver(m, adj, sorted, pos, movable, L, gap))
+    .map(m => buildComponentSolver(m, adj, sorted, pos, movable, L, gap, pairLength))
 
   if (!warm) {
     // Cold start: MDS per component, then each component's frame anchored onto its pins (or
@@ -265,10 +301,12 @@ export function organicLayout(
 
   // Stage 5 — overlap removal, guaranteed, per component.
   syncBoxes()
-  for (const m of components) {
-    if (m.length < 2) continue
-    removeOverlaps(m, boxes, pos, sorted, pinned, gap, stats)
-  }
+  const inComponent = new Map<number, LabelHint[]>()
+  for (const l of labels) { const c = compOf[l.a]; (inComponent.get(c) ?? inComponent.set(c, []).get(c)!).push(l) }
+  components.forEach((m, c) => {
+    if (m.length < 2) return
+    removeOverlaps(m, boxes, pos, sorted, pinned, gap, stats, inComponent.get(c) ?? [], !warm)
+  })
   syncBoxes()
 
   // Stage 6 — pack components (cold only; a sketch keeps its arrangement).
@@ -277,7 +315,7 @@ export function organicLayout(
     syncBoxes()
     // New nodes placed into a sketch, or components anchored by pins, can still collide across
     // components: one global pass over everything.
-    if (anyTooClose(boxes, gap)) removeOverlaps(components.flat(), boxes, pos, sorted, pinned, gap, stats)
+    if (anyTooClose(boxes, gap) || labelViolations(labels, boxes, pos).length) removeOverlaps(components.flat(), boxes, pos, sorted, pinned, gap, stats, labels)
   }
 
   const positions = new Map<string, Pt>()
@@ -302,6 +340,7 @@ function buildComponentSolver(
   movable: Uint8Array,
   L: number,
   gap: number,
+  pairLength: ReadonlyMap<string, number>,
 ): ComponentSolver {
   const m = members.length
   const local = new Map<number, number>()
@@ -328,8 +367,12 @@ function buildComponentSolver(
     const na = nodes[members[a]], nb = nodes[members[b]]
     return Math.hypot((na.width + nb.width) / 2, (na.height + nb.height) / 2) + gap
   }
+  const preferred = (a: number, b: number) => {
+    const ga = members[a], gb = members[b]
+    return pairLength.get(ga < gb ? `${ga}|${gb}` : `${gb}|${ga}`) ?? 0
+  }
   for (let a = 0; a < m; a++) for (const b of nbrs[a]) if (a < b) {
-    const f = Math.max(d[a * m + b], sep(a, b))
+    const f = Math.max(d[a * m + b], sep(a, b), preferred(a, b))
     d[a * m + b] = f; d[b * m + a] = f
   }
   // Stage 4 — stars: leaves of one hub (>= 3 leaves) sit on a ring instead of a stress clump.
@@ -337,10 +380,13 @@ function buildComponentSolver(
   // hop-2 ideal (2L), not L. Capping at L pulls every star's leaves inside their hop distance and
   // raised scale-fitted stress on real/miserables (many stars) from 0.129 to 0.142, past the
   // Stage 1 gate's 0.132; the cap only matters for k <= 6 anyway.
+  // A star whose spokes carry preferred lengths (edge labels) puts its leaves on a ring of that
+  // radius, so the leaves spread with the spokes instead of bunching at the shorter chord.
   for (let hub = 0; hub < m; hub++) {
     const leaves = nbrs[hub].filter(v => nbrs[v].length === 1)
     if (leaves.length < 3) continue
-    const ring = Math.max(0, Math.min(2 * L, 2 * L * Math.sin(Math.PI / leaves.length)))
+    const r = Math.max(L, ...leaves.map(v => preferred(hub, v)))
+    const ring = Math.max(0, Math.min(2 * r, 2 * r * Math.sin(Math.PI / leaves.length)))
     for (let i = 0; i < leaves.length; i++) for (let j = i + 1; j < leaves.length; j++) {
       const a = leaves[i], b = leaves[j]
       const f = Math.max(ring, sep(a, b))
@@ -542,7 +588,70 @@ function proximityEdges(members: number[], boxes: Box[]): Array<[number, number]
   return out
 }
 
-function removeOverlaps(members: number[], boxes: Box[], pos: Pt[], nodes: readonly LayoutNode[], pinned: boolean[], gap: number, stats: OrganicLayoutStats): void {
+/** The label box of a labelled edge: the straight midpoint of its endpoints, displaced `offset` px
+ *  to the left of the source->target direction (where a bowed edge carries its midpoint). */
+function labelBox(l: LabelHint, pos: Pt[]): Box {
+  const dx = pos[l.b].x - pos[l.a].x, dy = pos[l.b].y - pos[l.a].y
+  const dist = Math.hypot(dx, dy) || 1
+  return { x: (pos[l.a].x + pos[l.b].x) / 2 - (dy / dist) * l.offset, y: (pos[l.a].y + pos[l.b].y) / 2 + (dx / dist) * l.offset, w: l.w, h: l.h }
+}
+
+/**
+ * Label post-conditions, as pairs that must grow apart: a label overlapping one of its own
+ * endpoint boxes grows that edge; two labels at a shared endpoint overlapping each other grow the
+ * distance between their far endpoints (both midpoints move with it, the shared endpoint does
+ * not). Growing the edge by `t` grows the label's distance from the endpoint by the same `t`,
+ * so the factors are exactly those of the ordinary box pairs.
+ */
+function labelViolations(labels: readonly LabelHint[], boxes: Box[], pos: Pt[]): Array<{ a: number; b: number; t: number }> {
+  const out: Array<{ a: number; b: number; t: number }> = []
+  const lb = labels.map(l => labelBox(l, pos))
+  const atNode = new Map<number, number[]>()
+  const pair = (a: number, b: number, t: number) => out.push({ a: Math.min(a, b), b: Math.max(a, b), t })
+  labels.forEach((l, i) => {
+    for (const end of [l.a, l.b]) {
+      if (tooClose(boxes[end], lb[i], 0)) pair(l.a, l.b, growFactor(boxes[end], lb[i], 0))
+      ;(atNode.get(end) ?? atNode.set(end, []).get(end)!).push(i)
+    }
+  })
+  for (const [u, idx] of atNode) {
+    for (let i = 0; i < idx.length; i++) for (let j = i + 1; j < idx.length; j++) {
+      const li = labels[idx[i]], lj = labels[idx[j]]
+      const vi = li.a === u ? li.b : li.a
+      const vj = lj.a === u ? lj.b : lj.a
+      if (vi === vj || !tooClose(lb[idx[i]], lb[idx[j]], 0)) continue
+      pair(vi, vj, growFactor(lb[idx[i]], lb[idx[j]], 0))
+    }
+  }
+  return out
+}
+
+/**
+ * Best effort, not a post-condition: a box that is neither endpoint of a labelled edge but sits
+ * on that edge's label is nudged off it along the axis of least penetration (a renderer that
+ * steers labels away from boxes would otherwise slide the label along its edge and back into a
+ * sibling label). Growing a tree edge for this instead stretches the whole drawing, so the nudge
+ * is a plain translation; the ordinary overlap pass that follows repairs any box overlap it
+ * causes, and the loop re-checks. Pinned boxes are left alone. Returns how many boxes moved.
+ */
+function nudgeOffLabels(labels: readonly LabelHint[], members: readonly number[], boxes: Box[], pos: Pt[], pinned: boolean[]): number {
+  let moved = 0
+  for (const l of labels) {
+    const lb = labelBox(l, pos)
+    for (const c of members) {
+      if (c === l.a || c === l.b || pinned[c] || !tooClose(boxes[c], lb, 0)) continue
+      const px = (boxes[c].w + lb.w) / 2 - Math.abs(boxes[c].x - lb.x) + 0.5
+      const py = (boxes[c].h + lb.h) / 2 - Math.abs(boxes[c].y - lb.y) + 0.5
+      if (px < py) pos[c].x += boxes[c].x >= lb.x ? px : -px
+      else pos[c].y += boxes[c].y >= lb.y ? py : -py
+      boxes[c].x = pos[c].x; boxes[c].y = pos[c].y
+      moved++
+    }
+  }
+  return moved
+}
+
+function removeOverlaps(members: number[], boxes: Box[], pos: Pt[], nodes: readonly LayoutNode[], pinned: boolean[], gap: number, stats: OrganicLayoutStats, labels: readonly LabelHint[] = [], nudge = false): void {
   const sync = () => members.forEach(g => { boxes[g].x = pos[g].x; boxes[g].y = pos[g].y })
   // Coincident centers have no direction to grow along (growFactor would be infinite): nudge
   // them apart deterministically. Run before every pass, since a grow pass can create new ones.
@@ -559,18 +668,24 @@ function removeOverlaps(members: number[], boxes: Box[], pos: Pt[], nodes: reado
   }
   for (let pass = 0; pass < OVERLAP_MAX_PASSES; pass++) {
     separateCoincident()
+    const nudged = nudge && pass < NUDGE_PASSES ? nudgeOffLabels(labels, members, boxes, pos, pinned) : 0
     const overlapping: Array<[number, number]> = []
     for (let i = 0; i < members.length; i++) for (let j = i + 1; j < members.length; j++) {
       if (tooClose(boxes[members[i]], boxes[members[j]], gap)) overlapping.push([members[i], members[j]])
     }
-    if (overlapping.length === 0) return
+    const labelPairs = labelViolations(labels, boxes, pos)
+    if (overlapping.length === 0 && labelPairs.length === 0) { if (nudged === 0) return; continue }
     stats.overlapIterations++
     // Candidate tree edges: Delaunay edges plus every overlapping pair (wide boxes can overlap
-    // without being Delaunay-adjacent). Heaviest overlaps enter the tree first.
+    // without being Delaunay-adjacent) and every label pair that must grow. Heaviest overlaps
+    // enter the tree first.
     const cand = proximityEdges(members, boxes)
     const seen = new Set(cand.map(([a, b]) => `${a}|${b}`))
-    for (const [a, b] of overlapping) if (!seen.has(`${a}|${b}`)) cand.push([a, b])
-    const weighted = cand.map(([a, b]) => ({ a, b, t: growFactor(boxes[a], boxes[b], gap) }))
+    for (const [a, b] of overlapping) if (!seen.has(`${a}|${b}`)) { seen.add(`${a}|${b}`); cand.push([a, b]) }
+    for (const { a, b } of labelPairs) if (!seen.has(`${a}|${b}`)) { seen.add(`${a}|${b}`); cand.push([a, b]) }
+    const needed = new Map<string, number>()
+    for (const { a, b, t } of labelPairs) needed.set(`${a}|${b}`, Math.max(needed.get(`${a}|${b}`) ?? 1, t))
+    const weighted = cand.map(([a, b]) => ({ a, b, t: Math.max(growFactor(boxes[a], boxes[b], gap), needed.get(`${a}|${b}`) ?? 1) }))
     weighted.sort((p, q) => q.t - p.t || p.a - q.a || p.b - q.b)
     // Kruskal.
     const parent = new Map<number, number>(members.map(g => [g, g]))
@@ -614,6 +729,7 @@ function removeOverlaps(members: number[], boxes: Box[], pos: Pt[], nodes: reado
     separateCoincident()
     let t = 1
     for (let i = 0; i < members.length; i++) for (let j = i + 1; j < members.length; j++) t = Math.max(t, growFactor(boxes[members[i]], boxes[members[j]], gap))
+    for (const v of labelViolations(labels, boxes, pos)) t = Math.max(t, v.t)
     if (t <= 1) return
     stats.scaledUp++
     const anchor = members.find(g => pinned[g])
