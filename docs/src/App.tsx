@@ -53,6 +53,7 @@ import { ResultCardShowcase } from './showcases/ResultCardShowcase'
 import { AssetCardShowcase } from './showcases/AssetCardShowcase'
 import { LogStreamShowcase } from './showcases/LogStreamShowcase'
 import { TraceViewerShowcase } from './showcases/TraceViewerShowcase'
+import { version } from '../../package.json'
 
 type NavSection = {
   title: string
@@ -389,7 +390,7 @@ function App() {
 
   return (
     <ShellLayout
-      appTitle={{ title: 'Heimdall', version: 'v0.1.0' }}
+      appTitle={{ title: 'Heimdall', version: `v${version}` }}
       topbar={{
         breadcrumbs: [
           { label: sectionLabel },
@@ -422,7 +423,7 @@ function App() {
       }}
       statusbar={{
         left: <span>heimdall-ui</span>,
-        center: <span style={{ fontSize: '11px', color: 'rgb(var(--shell-fg-3))' }}>v0.1.0</span>,
+        center: <span style={{ fontSize: '11px', color: 'rgb(var(--shell-fg-3))' }}>v{version}</span>,
         right: <span>{NAV_SECTIONS.reduce((n, s) => n + s.items.length, 0)} components</span>,
       }}
     >

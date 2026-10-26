@@ -4,10 +4,15 @@ import react from '@vitejs/plugin-react'
 import dts from 'vite-plugin-dts'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import { readFileSync } from 'fs'
 
 const __dirname = process.env.VITE_PROJECT_DIR || path.dirname(fileURLToPath(import.meta.url))
 
+const pkg = JSON.parse(readFileSync(path.join(__dirname, 'package.json'), 'utf8'))
+
 export default defineConfig({
+  // The dev app's shell shows the package version (see src/App.tsx).
+  define: { __HEIMDALL_VERSION__: JSON.stringify(pkg.version) },
   plugins: [react(), dts({ include: 'src', exclude: ['**/*.test.ts', '**/*.test.tsx'] })],
   cacheDir: process.env.CI ? '/tmp/.vite' : undefined,
   resolve: {

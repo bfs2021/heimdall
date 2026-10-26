@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Graph layout release: four new `GraphCanvas` layout engines (`organic`, `orthogonal`,
+`radial-tree`, `ux-navigation`), a rewritten `galaxy`, a fixed `force-clustered`, and
+interactive popovers. The 0.8.1 entries below were never published, so they ship here.
+
 ### Added
 
 - **`GraphCanvas`** — `layout="organic"`, the first mode of the layout-engine rework and the
@@ -20,27 +24,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   isolates are circle-packed rather than gridded.
 - **`GraphCanvas`** — `layout="orthogonal"`, the second mode of the rework and the intended
   successor to `ux-navigation`. A headless, deterministic `orthogonalLayout()` (also exported)
-  places nodes on a cell grid, layered from a BFS spanning tree with crossing-minimized row
-  orders, and routes every edge as an axis-parallel polyline over a lattice of routing lanes:
-  routes never pass through a node, never share a segment with another route, and are
-  returned boundary to boundary, index-aligned with the edges. GraphCanvas renders them in
-  place of bezier paths (edges touching a dragged node fall back to a live bezier). On the
-  harness's Stage 1 exemplar (spec UX layer, 22 types / 33 relationships): 1 crossing, 0.73
-  bends per edge, every hard check green. Proof of concept: no bus/trunk sharing for tree
-  edges, no incremental mode, and the `ux-navigation` page/view hooks are not yet honored.
-
-## [0.8.1]
-
-### Fixed
-
-- **`GraphCanvas`** — `layout="force-clustered"` no longer smears clusters into each other on
-  dense graphs. Each Louvain cluster is now laid out on its own (internal edges only), clusters
-  are spaced by their real size, and each cluster is rotated to face the clusters it connects
-  to. On the college-football benchmark (115 nodes, 613 edges) node overlaps go from 53 to 0
-  and overlapping cluster bubbles from 93% to 2%; layout is also 2-10x faster.
+  places nodes on a cell grid and routes every edge as an axis-parallel polyline over a lattice
+  of routing lanes: routes never pass through a node, never share a segment with another route,
+  and are returned boundary to boundary, index-aligned with the edges. GraphCanvas renders them
+  in place of bezier paths (edges touching a dragged node fall back to a live bezier).
+  - Rows come from the structural forest when `isStructuralEdge` is given, otherwise from the
+    BFS layering with the fewest crossings; rows are crossing-minimized.
+  - Honors the ux-navigation hooks: with `isPageNode`, a page's views fan out to its right in
+    the same row; `isNavigationRoute` edges are routed last, around everything else.
+  - Re-running on its own output keeps every node's cell; pinned nodes hold their cell.
+  - On the harness's Stage 1 exemplar (22 types / 33 relationships): 1 crossing, 0.73 bends
+    per edge, every hard check green.
+  - Proof of concept: no incremental routing, and trunk sharing for tree edges
+    (`busTreeEdges`) is available from `orthogonalLayout()` only, not through GraphCanvas.
+- **`GraphCanvas`** — `layout="radial-tree"`: each structural tree (per `isStructuralEdge`) is
+  laid out around its root, with each depth on its own ring and rings sized from their own
+  population; several trees are packed as separate trunks without overlap. Supports
+  `collapsedNodeIds` and draws a boundary per trunk (`showClusterBoundaries`). Headless
+  `radialTreeLayout()` exported, with `RadialTreeLayoutOptions` (`ringSpacing`,
+  `nodeSeparationGap`, `trunkPadding`) and `RingGeometry`.
+- **`GraphCanvas`** — `showHierarchyRings` prop (`layout="radial-tree"` only, default false):
+  draws a ring per occupied depth around each trunk. Visual only.
+- **`GraphCanvas`** — `layout="ux-navigation"` for app screen maps: page nodes form top-to-bottom
+  trees, a page's views fan out beside it, independent trees and orphan views are arranged in
+  rows. New props `isPageNode` (page vs. view) and `isNavigationRoute` (route edges, hidden until
+  a page or view touching them is hovered; which routes show depends on whether the hovered node
+  is a collapsed page, an expanded page or a view). Structural-edge and route labels show only
+  when the edge is in focus. Headless `uxNavLayout()` and `visibleNavigationEdgeIds()` exported.
+- **`GraphCanvas`** — `structuralEdgeCurvature` prop (default 0.22): curvature for structural
+  edges without their own `curvature`; 0 draws them straight.
+- **`GraphCanvas`** — `nodePopover` / `edgePopover` render props: interactive content in a
+  `role="dialog"` popover anchored to a clicked or focused node or edge, tracking pan and zoom,
+  closed on Escape, background click or click outside.
+- **`GraphCanvas`** — `renderNode` receives a fourth argument, `props: { nodeId, tooltipId,
+  onSelect, onPopoverOpen }`. A custom renderer must call `onPopoverOpen(element)` on click when
+  it is defined, or `nodePopover` and click-triggered tooltips never open; `tooltipId` is the id
+  to put in the node's `aria-describedby`.
+- **`GraphNode`** — `popoverOpen`, `popoverPanelId`, `tooltipId`, `onFocus` and `onBlur` props,
+  used by GraphCanvas to wire popovers and tooltips to the default node.
+- **`GraphCanvas`** — `nodeTooltipTrigger` / `edgeTooltipTrigger` (`'hover' | 'click'`, default
+  `'hover'`). `'click'` renders the tooltip content in a `Popover` so it can hold buttons and
+  links. Node and edge tooltips are now wired to their targets with `aria-describedby`.
+- **`Popover`** — new compound component (`Popover`, `Popover.Trigger`, `Popover.Panel`) for
+  interactive, accessible content: controlled (`open` + `onOpenChange`) or uncontrolled,
+  `placement`, `offset`, `disableOutsideClick`, `panelId`.
+- **`GraphCollapseControl`** — the collapse/expand button GraphCanvas shows beside a hovered node
+  that has structural children, exported for custom overlays.
+- **`Tooltip`** — `id` prop, so a trigger elsewhere in the DOM can reference it with
+  `aria-describedby`.
+- **`GraphNodeData.weight`** — optional size weight for `layout="galaxy"` (ignored by every other
+  layout; unrelated to `GraphEdge.weight`). A node without one weighs the sum of its structural
+  children; when no node has a weight, each node weighs its subtree leaf count. Weights are
+  resolved over the full tree, so collapsing a subtree never resizes its parent.
+- **`GraphNode`** — `bodyRadius` prop: renders the node as a round body of that radius.
+- **`galaxyLayout`** — `GalaxyLayoutNode.weight` (orbit order) and `.radius` (true radius for a
+  round body, used instead of the box half-diagonal).
+- **`ChatComposer`** — `enterBehavior` prop (`'send' | 'newline'`, default `'send'`): controls Enter key behavior in the message textarea. When set to `'send'`, bare Enter submits the message and Shift+Enter inserts a newline (default behavior). When set to `'newline'`, bare Enter inserts a newline and Shift+Enter also inserts a newline — Submit only via the Send button. Enables touch-friendly and mobile-optimized input modes without forking or DOM-patching the component. The shortcut hint text automatically hides desktop-specific wording when `enterBehavior='newline'`.
 
 ### Changed
 
+- **`GraphCanvasContextValue.layout`** — the union now includes `'organic'`, `'orthogonal'`,
+  `'ux-navigation'` and `'radial-tree'`; an exhaustive `switch` over it needs the new cases.
+- **`findClearLabelPosition`** — new `isPolyline` parameter samples the points as a polyline
+  (orthogonal routes). Without it, only exactly four points are read as a cubic bezier; five or
+  more points are now sampled as a quadratic from the first three, where they were previously
+  read as a cubic from the first four.
 - **`GraphCanvas`** — `layout="galaxy"` rewritten to follow the original galaxy charts it was
   built to recreate (Risacher's D3 galaxy chart, Galaxies of the Guardian):
   - Without a `renderNode`, nodes are drawn as round bodies whose **area grows with weight**
@@ -67,16 +115,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     means touching). `settleCycles`, `separateGroups`, `resolvedAspectScale` and
     `resolveAspectRatioScale` are deprecated and have no effect.
 
-### Added
+### Fixed
 
-- **`GraphNodeData.weight`** — optional size weight for `layout="galaxy"` (ignored by every other
-  layout; unrelated to `GraphEdge.weight`). A node without one weighs the sum of its structural
-  children; when no node has a weight, each node weighs its subtree leaf count. Weights are
-  resolved over the full tree, so collapsing a subtree never resizes its parent.
-- **`GraphNode`** — `bodyRadius` prop: renders the node as a round body of that radius.
-- **`galaxyLayout`** — `GalaxyLayoutNode.weight` (orbit order) and `.radius` (true radius for a
-  round body, used instead of the box half-diagonal).
-- **`ChatComposer`** — `enterBehavior` prop (`'send' | 'newline'`, default `'send'`): controls Enter key behavior in the message textarea. When set to `'send'`, bare Enter submits the message and Shift+Enter inserts a newline (default behavior). When set to `'newline'`, bare Enter inserts a newline and Shift+Enter also inserts a newline — Submit only via the Send button. Enables touch-friendly and mobile-optimized input modes without forking or DOM-patching the component. The shortcut hint text automatically hides desktop-specific wording when `enterBehavior='newline'`.
+- **`GraphCanvas`** — `layout="force-clustered"` no longer smears clusters into each other on
+  dense graphs. Each Louvain cluster is now laid out on its own (internal edges only), clusters
+  are spaced by their real size, and each cluster is rotated to face the clusters it connects
+  to. On the college-football benchmark (115 nodes, 613 edges) node overlaps go from 53 to 0
+  and overlapping cluster bubbles from 93% to 2%; layout is also 2-10x faster.
 
 ## [0.8.0]
 
