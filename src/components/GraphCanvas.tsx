@@ -16,12 +16,13 @@ import {
   type BoundingBox,
   type EdgeAnchor,
 } from "../utils/graph";
-import { routeNavigationEdge, routeNavigationEdges, DEFAULT_TRACE_SPACING } from "../utils/channelRouter";
+import { routeNavigationEdge, routeNavigationEdges, polylineToRoutedEdge, DEFAULT_TRACE_SPACING, type RoutedEdge } from "../utils/channelRouter";
 import {
   forceLayout,
   clusteredForceLayout,
 } from "../utils/graphLayout";
 import { organicLayout } from "../utils/organicLayout";
+import { orthogonalLayout } from "../utils/orthogonalLayout";
 import {
   galaxyLayout,
   galaxyEffectiveWeights,
@@ -269,7 +270,7 @@ type InternalEdgeProps = GraphEdge & {
   popoverPanelId?: string;
   tooltipId?: string;
   isNavigationRoute?: boolean;
-  preRoutedEdge?: any; // RoutedEdge type from channelRouter
+  preRoutedEdge?: RoutedEdge;
 };
 
 // Margin (px, in graph space) kept clear around an edge label when steering it away from nodes.
@@ -589,7 +590,10 @@ export interface GraphCanvasProps extends Omit<
   /** 'manual' relies on explicit x/y per node. 'force' runs a spring layout for nodes without
    *  explicit coordinates. 'organic' is its successor: stress majorization with guaranteed
    *  overlap removal (see utils/organicLayout.ts), deterministic, no overlaps, nodeMargin honored
-   *  as a hard minimum gap. 'galaxy' arranges nodes as a radial hierarchy of orbits, built from
+   *  as a hard minimum gap. 'orthogonal' places nodes on a cell grid (layered from a BFS spanning
+   *  tree) and routes every edge as an axis-parallel polyline that never crosses a node or shares
+   *  a segment with another edge (see utils/orthogonalLayout.ts); its routes replace the bezier
+   *  paths. 'galaxy' arranges nodes as a radial hierarchy of orbits, built from
    *  structural edges (see isStructuralEdge). 'force-clustered' additionally groups nodes into
    *  nested bubbles by graph structure (see clusteredForceLayout in utils/graphLayout) before
    *  running the same spring simulation within each bubble — larger canvas, less-even
@@ -601,7 +605,7 @@ export interface GraphCanvasProps extends Omit<
    *  their parent pages (see isPageNode). 'radial-tree' arranges each structural tree as a
    *  centered radial hierarchy with descendants on depth rings, and multiple trunks packed without
    *  overlap. */
-  layout?: "manual" | "force" | "organic" | "galaxy" | "force-clustered" | "ux-navigation" | "radial-tree";
+  layout?: "manual" | "force" | "organic" | "orthogonal" | "galaxy" | "force-clustered" | "ux-navigation" | "radial-tree";
   /**
    * layout="force" | "organic" | "galaxy". Extra breathing room kept clear around each node's own footprint,
    * on top of what's needed to just avoid overlap — this is what leaves room for an edge to be
@@ -1136,6 +1140,10 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
     // Only populated when layout='radial-tree' — per-trunk hierarchy rings,
     // one per occupied depth level, for the optional ring-visualization layer.
     const [ringGeometry, setRingGeometry] = useState<RingGeometry[]>([]);
+    // layout="orthogonal" only: the engine's per-edge polylines, keyed by edge id, rendered in
+    // place of bezier paths via GraphEdgeInternal's preRoutedEdge (the same path navigation
+    // routes take). Empty for every other layout.
+    const [computedRoutes, setComputedRoutes] = useState<Map<string, RoutedEdge>>(new Map());
 
     const containerRef = useRef<HTMLDivElement>(null);
     const measureRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -1252,6 +1260,7 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
       if (
         (layout !== "force" &&
           layout !== "organic" &&
+          layout !== "orthogonal" &&
           layout !== "galaxy" &&
           layout !== "force-clustered" &&
           layout !== "ux-navigation" &&
@@ -1265,6 +1274,7 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
       // doesn't retrigger this effect (see liveActiveRef's own comment above) — only genuine
       // layout-input changes should, and those are already this effect's real dependencies.
       if (layout === "galaxy" && liveActiveRef.current) return;
+      if (layout !== "orthogonal") setComputedRoutes(new Map());
 
       const layoutNodes = visibleNodes.map((n, i) => ({
         id: n.id,
@@ -1307,6 +1317,34 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
           minimumNodeDistance: nodeMargin,
         });
         setComputedPositions(positions);
+        setClusterBoundaries(new Map());
+        setRingGeometry([]);
+      } else if (layout === "orthogonal") {
+        // Only edges whose endpoints are visible are laid out (a collapsed endpoint has no cell);
+        // routes come back index-aligned with this exact array and are zipped to edge ids here,
+        // never looked up by index at render time.
+        const visibleIds = new Set(visibleNodes.map((n) => n.id));
+        const engineEdges = (edges ?? []).filter(
+          (e) => visibleIds.has(e.sourceId) && visibleIds.has(e.targetId),
+        );
+        const orthogonalNodes = visibleNodes.map((n) => ({
+          id: n.id,
+          x: n.x ?? 0,
+          y: n.y ?? 0,
+          width: dims.get(n.id)?.width ?? DEFAULT_NODE_W,
+          height: dims.get(n.id)?.height ?? DEFAULT_NODE_H,
+        }));
+        const { positions, routes } = orthogonalLayout(
+          orthogonalNodes,
+          engineEdges.map((e) => ({ source: e.sourceId, target: e.targetId })),
+        );
+        const routed = new Map<string, RoutedEdge>();
+        engineEdges.forEach((e, i) => {
+          const r = polylineToRoutedEdge(routes[i] ?? []);
+          if (r) routed.set(e.id, r);
+        });
+        setComputedPositions(positions);
+        setComputedRoutes(routed);
         setClusterBoundaries(new Map());
         setRingGeometry([]);
       } else if (layout === "force-clustered") {
@@ -1607,6 +1645,7 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
       if (
         (layout === "force" ||
           layout === "organic" ||
+          layout === "orthogonal" ||
           layout === "galaxy" ||
           layout === "force-clustered" ||
           layout === "ux-navigation" ||
@@ -2065,6 +2104,19 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
     );
 
     // Batch-route all navigation edges together with overlapping-segment nudging
+    // Orthogonal routes to render: none unless layout="orthogonal", and never for an edge whose
+    // endpoint is being dragged (that edge falls back to a live bezier until the next layout).
+    const effectiveRoutes = useMemo(() => {
+      if (layout !== "orthogonal" || computedRoutes.size === 0) return new Map<string, RoutedEdge>();
+      if (dragPositions.size === 0) return computedRoutes;
+      const out = new Map<string, RoutedEdge>();
+      for (const e of edges ?? []) {
+        const r = computedRoutes.get(e.id);
+        if (r && !dragPositions.has(e.sourceId) && !dragPositions.has(e.targetId)) out.set(e.id, r);
+      }
+      return out;
+    }, [layout, computedRoutes, dragPositions, edges]);
+
     const navigationEdgeRoutes = useMemo(() => {
       if (layout !== "ux-navigation" || !isNavigationRoute) return new Map<string, any>();
 
@@ -2607,7 +2659,7 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
                       popoverPanelId={isPopoverOpen ? `popover-edge-${edge.id}` : undefined}
                       tooltipId={tooltipId}
                       isNavigationRoute={navigationRoute}
-                      preRoutedEdge={navigationEdgeRoutes.get(edge.id)}
+                      preRoutedEdge={navigationEdgeRoutes.get(edge.id) ?? effectiveRoutes.get(edge.id)}
                     />
                   );
                 })}

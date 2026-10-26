@@ -18,6 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from 0.34 (`force`) to 0.62 and scale-fitted stress from 0.151 to 0.039; 400-leaf stars,
   which drove `force` to `NaN`, stay finite. Proof of concept: no clustering option yet, and
   isolates are circle-packed rather than gridded.
+- **`GraphCanvas`** — `layout="orthogonal"`, the second mode of the rework and the intended
+  successor to `ux-navigation`. A headless, deterministic `orthogonalLayout()` (also exported)
+  places nodes on a cell grid, layered from a BFS spanning tree with crossing-minimized row
+  orders, and routes every edge as an axis-parallel polyline over a lattice of routing lanes:
+  routes never pass through a node, never share a segment with another route, and are
+  returned boundary to boundary, index-aligned with the edges. GraphCanvas renders them in
+  place of bezier paths (edges touching a dragged node fall back to a live bezier). On the
+  harness's Stage 1 exemplar (spec UX layer, 22 types / 33 relationships): 1 crossing, 0.73
+  bends per edge, every hard check green. Proof of concept: no bus/trunk sharing for tree
+  edges, no incremental mode, and the `ux-navigation` page/view hooks are not yet honored.
 
 ## [0.8.1]
 

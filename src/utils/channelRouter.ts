@@ -14,6 +14,20 @@ export interface RoutedEdge {
 /** Default spacing (px) between parallel segments when nudging overlapping edges apart */
 export const DEFAULT_TRACE_SPACING = 16
 
+/**
+ * Wraps a precomputed orthogonal polyline (e.g. from utils/orthogonalLayout) in the RoutedEdge
+ * shape GraphCanvas renders: SVG path, label midpoint and end angle, same formulas as
+ * routeNavigationEdge. Returns null for anything shorter than two points.
+ */
+export function polylineToRoutedEdge(points: readonly Point[]): RoutedEdge | null {
+  if (points.length < 2) return null
+  const pts = points.map(p => ({ x: p.x, y: p.y }))
+  const d = pointsToPathString(pts)
+  const mid = pts[Math.floor(pts.length / 2)]
+  const angle = Math.atan2(pts[pts.length - 1].y - pts[pts.length - 2].y, pts[pts.length - 1].x - pts[pts.length - 2].x)
+  return { d, mid, angle, points: pts, isPolyline: true }
+}
+
 export function routeNavigationEdge(
   source: EdgeEndpointRect,
   target: EdgeEndpointRect,
