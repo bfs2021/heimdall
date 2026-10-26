@@ -6,7 +6,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`agent-skills/heimdall-observability`** — new skill for `TraceViewer` (with the `fromOTLP` /
+  `fromXRay` adapters and the trace-model helpers), `LogStream`, `DiffViewer`, `HashSetDiff`,
+  `SideBySideDiff`, `VersionTimeline` and `LineageRail`.
+- **`agent-skills/heimdall-planning`** — new skill for `Calendar`, `MiniCalendar` and `KanbanBoard`.
+- **`npm run check:skills`** (`scripts/check-skill-coverage.mjs`) — fails when an exported
+  component has no section in its assigned skill, a hook or utility export is never named, a skill
+  documents a component that is not exported, or a props table names a prop the component type
+  does not accept or leaves out one declared in `src/`. The release workflow runs it before the
+  visual tests.
+
 ### Changed
+
+- **Every agent skill regenerated against the current source.** The skills were written in May
+  and had drifted: 22 public components were in no skill, and many props tables were incomplete.
+  All 13 skills now cover every value exported from `src/index.ts`. Notable corrections:
+  - `heimdall-charts` documented a `PieChart` that does not exist; it is removed, and the pie case
+    is described under `Donut`. `ChartWrapper` and `BarChart` gained sections.
+  - `heimdall-inputs` described `Select` as a native `<select>` wrapper. It is a custom dropdown
+    with single and multi modes and `Select.Item` / `Select.CheckboxItem` / `Select.Separator` /
+    `Select.SectionTitle` children.
+  - `heimdall-data-display` implied `Table` sorts its rows; it only tracks the sort header, and
+    the consumer sorts in `onSort`. Added `ResultCard`, `AssetCard`, `AssetGrid` and `MapCanvas`.
+  - `heimdall-shell` no longer tells consumers to pad the `ShellLayout` canvas (it pads itself),
+    and documents the mobile drawer behavior behind `mobileBreakpoint`.
+  - Added `Avatar` (primitives), `Tooltip` and `Popover` (overlays), `ChatMarkdownContent`
+    (chat), `useMediaQuery` (layout), and in `heimdall-graph`: `GraphEdgeShape`, `GraphToolbar`,
+    `GraphCollapseControl`, `GraphEdgeInspector`, `DetailDrawer`, `usePanZoom` and the geometry
+    utilities.
+  - Missing props added across `Sidebar`, `Topbar`, `AppTitle`, `Statusbar`, `VersionPill`,
+    `Drawer`, `FilterDropdown`, `EntityPicker`, `RowMenu`, `PipelineCard`, `ChatComposer`,
+    `GraphCanvas`, `GraphNode`, `GraphEdge` and six charts. `Icon` points at `ICONS` instead of a
+    stale list of names.
+- **`/refine-component-skills`** — the category table now assigns every public export to a skill
+  (two new categories: observability, planning). Prop tables use backticked names so the checker
+  can read them.
+- **README** — new "Agent skills" section with setup instructions and the skill list.
 
 - **`agent-skills/heimdall-graph`** — brought up to date with 0.9.0. The skill now covers all
   eight `GraphCanvas` layouts (what data each suits, the props it reads, and its limits; `organic`

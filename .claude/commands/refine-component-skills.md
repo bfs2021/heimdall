@@ -9,7 +9,7 @@ Create and update the Heimdall consumer skill library at `agent-skills/`. These 
 
 ## Your Task
 
-Produce (or update) 11 category-level skill files in `agent-skills/` at the repo root. Each file is a self-contained reference guide for a group of related Heimdall components — copy-paste ready, with full prop tables, usage examples, and gotchas.
+Produce (or update) the category-level skill files listed under Category Definitions in `agent-skills/` at the repo root. Each file is a self-contained reference guide for a group of related Heimdall components — copy-paste ready, with full prop tables, usage examples, and gotchas.
 
 Process categories **one at a time** via sub-agents and write the file after each category completes, so partial runs are recoverable. The target audience for these skills is a coding agent building a consumer application — not a design system contributor.
 
@@ -19,19 +19,23 @@ Process categories **one at a time** via sub-agents and write the file after eac
 
 ## Category Definitions
 
-| Category slug            | Skill file                                     | Components                                                                                                                                |
-| ------------------------ | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `heimdall-primitives`    | `agent-skills/heimdall-primitives/SKILL.md`    | Icon, Button, Chip, Badge, StatusBadge, VersionPill, SegmentedControl                                                                     |
-| `heimdall-inputs`        | `agent-skills/heimdall-inputs/SKILL.md`        | TextInput, TextArea, NumberInput, Select, TriState, Field, FilterDropdown, EntityPicker, KeyValueEditor, OrderedList, RelationshipBuilder |
-| `heimdall-data-display`  | `agent-skills/heimdall-data-display/SKILL.md`  | StatTile, StatGrid, Table, KVGrid, InspectorPanel                                                                                         |
-| `heimdall-navigation`    | `agent-skills/heimdall-navigation/SKILL.md`    | NavItem, Sidebar, Topbar, TabBar                                                                                                          |
-| `heimdall-shell`         | `agent-skills/heimdall-shell/SKILL.md`         | AppTitle, Titlebar, Statusbar, ShellLayout                                                                                                |
-| `heimdall-overlays`      | `agent-skills/heimdall-overlays/SKILL.md`      | Modal, ConfirmDialog, Toast, CommandPalette, WorkspaceSwitcherDialog, Drawer                                                              |
-| `heimdall-layout`        | `agent-skills/heimdall-layout/SKILL.md`        | Panel, SplitPane                                                                                                                          |
-| `heimdall-charts`        | `agent-skills/heimdall-charts/SKILL.md`        | Sparkline, LineChart, BarChart, BarV, BarH, StackedBar, Donut, PieChart, Heatmap, StatusTimeline, ProgressBar, MetricRow                  |
-| `heimdall-page-patterns` | `agent-skills/heimdall-page-patterns/SKILL.md` | PageHeader, FilterBar, ActivityTimeline, AlertStrip, QuickAccessGrid, QuickAccessTile, ConfigTile, PipelineCard, FormCallout, RowMenu     |
-| `heimdall-chat`          | `agent-skills/heimdall-chat/SKILL.md`          | ChatMessage, ToolBlock, ThinkingBlock, ChatDivider, ChatSuggestions, ChatComposer, ChatContainer                                          |
-| `heimdall-graph`         | `agent-skills/heimdall-graph/SKILL.md`         | GraphCanvas, GraphNode, GraphEdge, GraphInspector, TopologyNode, HierarchyRow, HierarchyTree                                              |
+| Category slug            | Skill file                                     | Components                                                                                                                                                         | Also document (non-component exports)                                                                                                                                  |
+| ------------------------ | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `heimdall-primitives`    | `agent-skills/heimdall-primitives/SKILL.md`    | Icon, Avatar, Button, Chip, Badge, StatusBadge, VersionPill, SegmentedControl                                                                                      | ICONS                                                                                                                                                                  |
+| `heimdall-inputs`        | `agent-skills/heimdall-inputs/SKILL.md`        | TextInput, TextArea, NumberInput, Select, TriState, Field, FilterDropdown, EntityPicker, KeyValueEditor, OrderedList, RelationshipBuilder                          |                                                                                                                                                                        |
+| `heimdall-data-display`  | `agent-skills/heimdall-data-display/SKILL.md`  | StatTile, StatGrid, Table, KVGrid, InspectorPanel, ResultCard, AssetCard, AssetGrid, MapCanvas                                                                     |                                                                                                                                                                        |
+| `heimdall-navigation`    | `agent-skills/heimdall-navigation/SKILL.md`    | NavItem, Sidebar, Topbar, TabBar                                                                                                                                   |                                                                                                                                                                        |
+| `heimdall-shell`         | `agent-skills/heimdall-shell/SKILL.md`         | AppTitle, Titlebar, Statusbar, ShellLayout                                                                                                                         |                                                                                                                                                                        |
+| `heimdall-overlays`      | `agent-skills/heimdall-overlays/SKILL.md`      | Modal, ConfirmDialog, Toast, Tooltip, Popover, CommandPalette, WorkspaceSwitcherDialog, Drawer                                                                     |                                                                                                                                                                        |
+| `heimdall-layout`        | `agent-skills/heimdall-layout/SKILL.md`        | Panel, SplitPane                                                                                                                                                   | useMediaQuery                                                                                                                                                          |
+| `heimdall-charts`        | `agent-skills/heimdall-charts/SKILL.md`        | ChartWrapper, Sparkline, LineChart, BarChart, BarV, BarH, StackedBar, Donut, Heatmap, StatusTimeline, ProgressBar, MetricRow                                       |                                                                                                                                                                        |
+| `heimdall-page-patterns` | `agent-skills/heimdall-page-patterns/SKILL.md` | PageHeader, FilterBar, ActivityTimeline, AlertStrip, QuickAccessGrid, QuickAccessTile, ConfigTile, PipelineCard, FormCallout, RowMenu                              |                                                                                                                                                                        |
+| `heimdall-chat`          | `agent-skills/heimdall-chat/SKILL.md`          | ChatMessage, ToolBlock, ThinkingBlock, ChatDivider, ChatSuggestions, ChatComposer, ChatContainer, ChatMarkdownContent                                              |                                                                                                                                                                        |
+| `heimdall-graph`         | `agent-skills/heimdall-graph/SKILL.md`         | GraphCanvas, GraphNode, GraphEdge, GraphEdgeShape, GraphToolbar, GraphCollapseControl, GraphInspector, GraphEdgeInspector, DetailDrawer, TopologyNode, HierarchyRow, HierarchyTree | useGraphCanvas, usePanZoom, the layout functions (forceLayout, clusteredForceLayout, organicLayout, …), the graph utilities (bezierPath, rectEdgePoint, louvainCluster, …) |
+| `heimdall-observability` | `agent-skills/heimdall-observability/SKILL.md` | TraceViewer, LogStream, DiffViewer, HashSetDiff, SideBySideDiff, VersionTimeline, LineageRail                                                                      | fromOTLP, fromXRay, buildTraceModel and the other trace-model helpers, DEFAULT_SERVICE_PALETTE                                                                         |
+| `heimdall-planning`      | `agent-skills/heimdall-planning/SKILL.md`      | Calendar, MiniCalendar, KanbanBoard                                                                                                                                |                                                                                                                                                                        |
+
+Every value exported from `src/index.ts` belongs to exactly one row. When a component is added to `src/index.ts`, add it to a row here (or add a row) and give it a section in that skill. `npm run check:skills` (`scripts/check-skill-coverage.mjs`) enforces this: it fails when an exported component has no `## ComponentName` section, when a section is in a different skill than this table says, when a non-component export is never named in any skill, or when a skill documents a component or prop that the code does not export.
 
 ---
 
@@ -81,9 +85,10 @@ import { ComponentName } from '@tinkermonkey/heimdall-ui'
 
 ### Props
 
-| Prop     | Type | Default | Description      |
-| -------- | ---- | ------- | ---------------- |
-| propName | type | default | What it controls |
+| Prop         | Type   | Default    | Description      |
+| ------------ | ------ | ---------- | ---------------- |
+| `propName`   | `type` | `default`  | What it controls |
+| `...divProps` |       |            | Remaining props spread onto the root `<div>` |
 
 ### Usage
 
@@ -102,16 +107,22 @@ import { ComponentName } from '@tinkermonkey/heimdall-ui'
 />
 \`\`\`
 
-### Compound Subcomponents
+### Compound subcomponents
 
 (Only include this section if the component uses a compound pattern)
 
-- `ComponentName.Sub` — what it does
+#### ComponentName.Sub
+
+What it does, then its own props table in the same format as `### Props`.
 
 ### Gotchas
 
 - Bullet list of common mistakes or non-obvious behaviors
 ```
+
+### Step 3: Check coverage and props
+
+Run `npm run check:skills`. Fix every reported problem before moving to the next category.
 
 ---
 
@@ -123,18 +134,22 @@ import { ComponentName } from '@tinkermonkey/heimdall-ui'
 - **Defaults from source** — copy defaults directly from the component source, not from memory
 - **Gotchas from source** — identify real gotchas by reading the code (e.g., "FilterDropdown uses a compound pattern — you must include `<FilterDropdown.Trigger>` and `<FilterDropdown.Panel>` as children"), not generic advice
 - **Audience is a consumer app developer** — explain how to use the component, not how it's implemented internally
+- **Table format** — the first column of a props table is the prop name in backticks; a spread row (`...divProps`) starts with `...`. `npm run check:skills` reads these tables and fails on a prop the component type does not accept
+- **One `## ComponentName` heading per component**, spelled exactly as exported. Sections that are not a component (utilities, hooks, recipes) use a heading of more than one word, such as `## Trace adapters`
+- **No lists that silently go stale** — when a set of values lives in code (icon names, palette entries), point at the export that holds it (`Object.keys(ICONS)`) rather than copying the whole list
+- **Voice** — follow the content rules in `CLAUDE.md`: terse and impersonal, sentence case, no "we", no exclamation marks, no emoji. Example data uses monospace snake_case identifiers
 - **Concise** — prop descriptions should be ≤10 words; usage examples should show the minimal viable usage first, then the rich example
 
 ---
 
 ## Output After All Categories
 
-When all 11 files are written:
+When every file in the table is written:
 
 ```
 ## /refine-component-skills — Complete
 
-Generated or updated 11 skill files in agent-skills/:
+Generated or updated N skill files in agent-skills/:
 
 | File | Components | Lines |
 |------|-----------|-------|
