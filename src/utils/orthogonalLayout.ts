@@ -390,23 +390,39 @@ function layoutComponent(
   }
   let layerings: ReturnType<typeof bfs>[]
   if (forest) {
-    // Depth in the structural forest (roots at row 0); relational edges never move a node up.
-    const depth = new Map<number, number>()
-    const order: number[] = []
-    const roots = core.filter(g => { const p = forest.parentOf.get(nodes[g].id); return p === undefined || !core.includes(index.get(p)!) })
-    for (const r0 of roots) { depth.set(r0, 0); order.push(r0) }
-    for (let h = 0; h < order.length; h++) {
-      const u = order[h]
-      for (const childId of forest.childrenOf.get(nodes[u].id) ?? []) {
-        const v = index.get(childId)!
-        if (!core.includes(v) || depth.has(v)) continue
-        depth.set(v, depth.get(u)! + 1); order.push(v)
+    // Structural skeleton over a BFS layering: every edge spreads the nodes into rows from a
+    // candidate root (so a layer whose structural forest is sparse is not one row of roots), then
+    // each structural child is pushed below its parent, in forest order. A relational edge can
+    // move a node down, never above or beside its parent. Candidate roots are the forest roots.
+    const coreSet = new Set(core)
+    const parentOf = (g: number): number | undefined => {
+      const p = forest.parentOf.get(nodes[g].id)
+      const v = p === undefined ? undefined : index.get(p)
+      return v !== undefined && coreSet.has(v) ? v : undefined
+    }
+    const roots = core.filter(g => parentOf(g) === undefined)
+    const forestOrder: number[] = [...roots]
+    for (let h = 0; h < forestOrder.length; h++) {
+      for (const childId of forest.childrenOf.get(nodes[forestOrder[h]].id) ?? []) {
+        const v = index.get(childId)
+        if (v !== undefined && coreSet.has(v) && parentOf(v) === forestOrder[h]) forestOrder.push(v)
       }
     }
-    for (const g of core) if (!depth.has(g)) { depth.set(g, 0); order.push(g) }
-    const widths = new Map<number, number>()
-    for (const d of depth.values()) widths.set(d, (widths.get(d) ?? 0) + 1)
-    layerings = [{ root: roots[0] ?? core[0], depth, order, widest: Math.max(...widths.values()), rows: widths.size }]
+    const constrained = (root: number) => {
+      const l = bfs(root)
+      for (const u of forestOrder) {
+        const p = parentOf(u)
+        if (p !== undefined && l.depth.get(u)! <= l.depth.get(p)!) l.depth.set(u, l.depth.get(p)! + 1)
+      }
+      // Pushing down can leave an empty row; close the gaps so rows stay consecutive.
+      const used = [...new Set(l.depth.values())].sort((a, b) => a - b)
+      const dense = new Map(used.map((d, i) => [d, i]))
+      for (const [g, d] of l.depth) l.depth.set(g, dense.get(d)!)
+      const widths = new Map<number, number>()
+      for (const d of l.depth.values()) widths.set(d, (widths.get(d) ?? 0) + 1)
+      return { ...l, widest: Math.max(...widths.values()), rows: widths.size }
+    }
+    layerings = (roots.length ? roots : core).map(constrained)
   } else {
     layerings = core.map(bfs)
   }
