@@ -1,5 +1,20 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, type Page } from '@playwright/test'
 import { loadSelfHostedFonts, assertFontsLoaded, applyDarkCanvasMode, freezeAnimations } from './utils/test-helpers'
+
+// Day view shows "today" from the system clock, so freeze it inside the fixture's
+// month (June 2026, see CalendarTestPage.tsx) for a baseline that doesn't drift
+// with the date. Select the view by its exact name: a "Day" substring match also
+// hits the "Today" button, which navigates to the real current month instead.
+async function openDayViewWithFrozenClock(page: Page) {
+  await page.clock.install({ time: new Date(2026, 5, 15) })
+  await page.reload()
+  await page.waitForLoadState('networkidle')
+  await loadSelfHostedFonts(page)
+  await assertFontsLoaded(page)
+  await freezeAnimations(page)
+  await page.getByRole('radio', { name: 'Day', exact: true }).click()
+  await page.waitForTimeout(100)
+}
 
 test.describe('integration: Calendar Components', () => {
   test.beforeEach(async ({ page }) => {
@@ -47,17 +62,13 @@ test.describe('integration: Calendar Components', () => {
   })
 
   test('day view light canvas snapshot', async ({ page }) => {
-    const dayButton = page.locator('button:has-text("Day")').first()
-    await dayButton.click()
-    await page.waitForTimeout(100)
+    await openDayViewWithFrozenClock(page)
 
     await expect(page).toHaveScreenshot('calendar-day-light-canvas.png', { fullPage: true })
   })
 
   test('day view dark canvas snapshot', async ({ page }) => {
-    const dayButton = page.locator('button:has-text("Day")').first()
-    await dayButton.click()
-    await page.waitForTimeout(100)
+    await openDayViewWithFrozenClock(page)
 
     await applyDarkCanvasMode(page)
     await expect(page).toHaveScreenshot('calendar-day-dark-canvas.png', { fullPage: true })
