@@ -56,6 +56,12 @@ interactive popovers. The 0.8.1 entries below were never published, so they ship
 - **`GraphCanvas`** — `nodePopover` / `edgePopover` render props: interactive content in a
   `role="dialog"` popover anchored to a clicked or focused node or edge, tracking pan and zoom,
   closed on Escape, background click or click outside.
+- **`GraphCanvas`** — `renderNode` receives a fourth argument, `props: { nodeId, tooltipId,
+  onSelect, onPopoverOpen }`. A custom renderer must call `onPopoverOpen(element)` on click when
+  it is defined, or `nodePopover` and click-triggered tooltips never open; `tooltipId` is the id
+  to put in the node's `aria-describedby`.
+- **`GraphNode`** — `popoverOpen`, `popoverPanelId`, `tooltipId`, `onFocus` and `onBlur` props,
+  used by GraphCanvas to wire popovers and tooltips to the default node.
 - **`GraphCanvas`** — `nodeTooltipTrigger` / `edgeTooltipTrigger` (`'hover' | 'click'`, default
   `'hover'`). `'click'` renders the tooltip content in a `Popover` so it can hold buttons and
   links. Node and edge tooltips are now wired to their targets with `aria-describedby`.
@@ -77,6 +83,12 @@ interactive popovers. The 0.8.1 entries below were never published, so they ship
 
 ### Changed
 
+- **`GraphCanvasContextValue.layout`** — the union now includes `'organic'`, `'orthogonal'`,
+  `'ux-navigation'` and `'radial-tree'`; an exhaustive `switch` over it needs the new cases.
+- **`findClearLabelPosition`** — new `isPolyline` parameter samples the points as a polyline
+  (orthogonal routes). Without it, only exactly four points are read as a cubic bezier; five or
+  more points are now sampled as a quadratic from the first three, where they were previously
+  read as a cubic from the first four.
 - **`GraphCanvas`** — `layout="galaxy"` rewritten to follow the original galaxy charts it was
   built to recreate (Risacher's D3 galaxy chart, Galaxies of the Guardian):
   - Without a `renderNode`, nodes are drawn as round bodies whose **area grows with weight**

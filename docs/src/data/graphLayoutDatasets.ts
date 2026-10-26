@@ -377,7 +377,7 @@ export const LAYOUT_INFO: Record<LayoutKey, LayoutInfo> = {
   'ux-navigation': {
     label: 'UX navigation',
     summary: 'Page trees top to bottom with view fans to the side; navigation routes appear on hover.',
-    caveat: 'Needs isPageNode and page-sourced structural edges; without them every node lands in one flat row.',
+    caveat: 'Needs structural edges from each page to its children; without them every node lands in one flat row. Without isPageNode every node is a page, so there are no view fans.',
     recommended: 'pages',
   },
 }

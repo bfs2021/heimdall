@@ -68,7 +68,7 @@ const GALLERY_OPTIONS: Record<LayoutKey, Partial<GraphCanvasProps>> = {
   'radial-tree': { showHierarchyRings: true, showClusterBoundaries: false },
   'force-clustered': {},
   force: {},
-  'ux-navigation': { draggable: false },
+  'ux-navigation': {},
 }
 
 // ─── Gallery ───────────────────────────────────────────────────────────────
@@ -282,13 +282,17 @@ export function GraphLayoutsShowcase() {
       }
     : undefined
 
-  const showRelationsControl = hasHierarchy(dataset) && layout !== 'ux-navigation'
+  // Only meaningful when there are relational edges for isStructuralEdge to hide. Orthogonal always
+  // draws them (routing every edge is its point); ux-navigation reveals routes on hover instead.
+  const showRelationsControl = hasHierarchy(dataset)
+    && layout !== 'ux-navigation' && layout !== 'orthogonal'
+    && dataset.edges.some(e => e.role === 'relational')
 
   return (
     <div>
       <PageHeader
         name="Graph Layouts"
-        description="GraphCanvas has seven automatic layout engines, each built for a different shape of graph: galaxy for weighted hierarchies, organic for general graphs, orthogonal for mostly-tree diagrams with routed edges, radial-tree for a single deep tree, force-clustered for graphs with community structure, force for arbitrary graphs, and ux-navigation for page/view screen maps. Every engine measures real rendered node size, so swapping node rendering never causes overlap."
+        description="GraphCanvas has seven automatic layout engines, each built for a different shape of graph: galaxy for weighted hierarchies, organic for general graphs, orthogonal for mostly-tree diagrams with routed edges, radial-tree for a single deep tree, force-clustered for graphs with community structure, force for arbitrary graphs, and ux-navigation for page/view screen maps. Every engine sizes its layout from real rendered node size, so swapping node rendering needs no retuning."
       />
       <ShowcaseSection
         label="Layout gallery"
@@ -308,7 +312,7 @@ export function GraphLayoutsShowcase() {
       </ShowcaseSection>
       <ShowcaseSection
         label="Interactive comparison"
-        description="Run any engine on any dataset. Nodes with a chevron have structural children; click it to collapse the subtree. Relational edges are hidden until a node touching them is hovered, unless Relations is set to All. Default node rendering draws galaxy nodes as round bodies sized by weight; Cards swaps in a custom renderNode. Selecting a node or edge opens a detail panel; drag its left edge to resize."
+        description="Run any engine on any dataset. Nodes with a chevron have structural children; click it to collapse the subtree. Relational edges are hidden until a node touching them is hovered, unless Relations is set to All; orthogonal always draws them. Default node rendering draws galaxy nodes as round bodies sized by weight; Cards swaps in a custom renderNode. Selecting a node or edge opens a detail panel; drag its left edge to resize."
       >
         <DemoCard>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -426,7 +430,7 @@ export function GraphLayoutsShowcase() {
                 showClusterBoundaries={effectiveBoundaries}
                 showHierarchyRings={layout === 'radial-tree' && showRings}
                 structuralEdgeCurvature={edgeStyle === 'straight' ? 0 : undefined}
-                showAllRelations={showAllRelations || layout === 'orthogonal'}
+                showAllRelations={(showRelationsControl && showAllRelations) || layout === 'orthogonal'}
                 draggable={draggable}
                 fitView
                 fitPadding={40}
