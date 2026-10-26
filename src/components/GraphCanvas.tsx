@@ -2485,20 +2485,31 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
       }
     }, [popoverTarget, activePopoverNodeId, activePopoverEdgeId]);
 
-    // Move focus to popover panel's first focusable child when popover opens (WCAG 2.1.1).
-    useEffect(() => {
-      if (!popoverTarget) return;
-
-      const panelId = popoverTarget.type === "node" ? `popover-node-${popoverTarget.nodeId}` : `popover-edge-${popoverTarget.edgeId}`;
-      const panelElement = document.getElementById(panelId);
-      if (!panelElement) return;
-
-      const focusableSelector = 'a, button, input, select, textarea, [tabindex]:not([tabindex="-1"])';
-      const focusableElements = panelElement.querySelectorAll(focusableSelector);
-      if (focusableElements.length > 0) {
-        (focusableElements[0] as HTMLElement).focus();
+    const closePopover = useCallback(() => {
+      // Restore focus to the element that triggered the popover
+      const triggeringElement = popoverTriggeringElementRef.current;
+      if (triggeringElement && document.body.contains(triggeringElement)) {
+        triggeringElement.focus();
       }
-    }, [popoverTarget]);
+      setActivePopoverNodeId(undefined);
+      setActivePopoverEdgeId(undefined);
+      popoverTriggeringElementRef.current = null;
+    }, []);
+
+    // Popover handles Escape while focus is inside its panel (and stops it there). This catches
+    // Escape everywhere else in the canvas — e.g. focus still on the node or edge that opened a
+    // popover with no focusable content.
+    const handleCanvasKeyDown = useCallback(
+      (e: React.KeyboardEvent<HTMLDivElement>) => {
+        if (e.key === "Escape" && popoverTarget) {
+          e.preventDefault();
+          closePopover();
+          return;
+        }
+        bind.onKeyDown(e);
+      },
+      [popoverTarget, closePopover, bind],
+    );
 
     // Document-level mousedown listener to dismiss popover when clicking outside the GraphCanvas container.
     // This preserves smooth in-canvas transitions while fixing the original issue of popovers not closing
@@ -2576,7 +2587,7 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
         className={["graph-canvas", className].filter(Boolean).join(" ")}
         onPointerDown={handlePointerDown}
         onPointerUp={handleCanvasPointerUp}
-        onKeyDown={bind.onKeyDown}
+        onKeyDown={handleCanvasKeyDown}
         tabIndex={bind.tabIndex}
         role={bind.role}
         {...props}
@@ -2876,17 +2887,10 @@ export const GraphCanvas = React.forwardRef<HTMLDivElement, GraphCanvasProps>(
                   key={popoverTarget.type === "node" ? popoverTarget.nodeId : popoverTarget.edgeId}
                   open={true}
                   onOpenChange={(open) => {
-                    if (!open) {
-                      // Restore focus to the element that triggered the popover
-                      const triggeringElement = popoverTriggeringElementRef.current;
-                      if (triggeringElement && document.body.contains(triggeringElement)) {
-                        triggeringElement.focus();
-                      }
-                      setActivePopoverNodeId(undefined);
-                      setActivePopoverEdgeId(undefined);
-                      popoverTriggeringElementRef.current = null;
-                    }
+                    if (!open) closePopover();
                   }}
+                  // Focus moves into the panel on open (WCAG 2.1.1)
+                  autoFocus
                   placement="top"
                   disableOutsideClick={true}
                   panelId={popoverTarget.type === "node" ? `popover-node-${popoverTarget.nodeId}` : `popover-edge-${popoverTarget.edgeId}`}

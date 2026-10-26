@@ -22,6 +22,8 @@ interface PopoverBaseProps {
   disableOutsideClick?: boolean
   /** Optional custom ID for the popover panel. When provided, both Trigger and Panel use this ID. */
   panelId?: string
+  /** Move focus to the panel's first focusable element when it opens. Default: false. */
+  autoFocus?: boolean
   children: React.ReactNode
 }
 
@@ -99,6 +101,7 @@ const PopoverComponent = React.forwardRef<
       offset = 8,
       disableOutsideClick = false,
       panelId: customPanelId,
+      autoFocus = false,
       children,
     },
     ref
@@ -115,7 +118,7 @@ const PopoverComponent = React.forwardRef<
     const panelRef = useRef<HTMLDivElement>(null)
     const wrapperRef = useRef<HTMLDivElement>(null)
 
-    useFocusTrap(panelRef, isOpen, { mode: 'popup' })
+    useFocusTrap(panelRef, isOpen, { mode: 'popup', initialFocus: autoFocus })
 
     // Validate controlled mode: if open is provided, onOpenChange must also be provided
     useEffect(() => {
