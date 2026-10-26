@@ -13,6 +13,14 @@ on:
         description: "Optional: specific spec file(s)/pattern to limit the run (e.g. tests/calendar.spec.ts). Leave blank to update the full suite."
         required: false
         default: ""
+      mode:
+        description: "Which baselines to rewrite: 'changed' (only those that fail the 1% pixel tolerance; Playwright's default) or 'all' (every baseline the spec captures, for when a stale picture still passes the tolerance)."
+        required: false
+        default: "changed"
+        type: choice
+        options:
+          - changed
+          - all
 
 permissions:
   contents: read
@@ -37,7 +45,7 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Update snapshots
-        run: npx playwright test ${{ github.event.inputs.spec }} --update-snapshots --reporter=line
+        run: npx playwright test ${{ github.event.inputs.spec }} --update-snapshots=${{ github.event.inputs.mode || 'changed' }} --reporter=line
 
       - name: Collect changed snapshots
         id: collect
