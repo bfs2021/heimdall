@@ -345,7 +345,10 @@ test.describe('integration: Overlay Components', () => {
       await expect(toast).toBeVisible()
 
       await freezeAnimations(page)
+      // The toast renders below the Tooltip and Popover sections, past the bottom of a
+      // 720px viewport, so a viewport-only screenshot never contains it.
       await expect(page).toHaveScreenshot('toast-open.png', {
+        fullPage: true,
         maxDiffPixelRatio: 0.01,
       })
     })
@@ -567,7 +570,10 @@ test.describe('integration: Overlay Components', () => {
       const toast = page.locator('[role="status"]').first()
       await expect(toast).toBeVisible()
       await freezeAnimations(page)
+      // The toast renders below the Tooltip and Popover sections, past the bottom of a
+      // 720px viewport, so a viewport-only screenshot never contains it.
       await expect(page).toHaveScreenshot('toast-open-dark.png', {
+        fullPage: true,
         maxDiffPixelRatio: 0.01,
       })
     })
