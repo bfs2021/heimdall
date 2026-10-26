@@ -629,7 +629,7 @@ function routeAll(
   const laneOffsets = Array.from({ length: o.lanes }, (_, k) => (k - (o.lanes - 1) / 2) * o.laneSpacing)
   const portOffsets = (half: number, step: number, max: number): number[] => {
     const out = [0]
-    for (let k = 1; k <= max; k++) { if (k * step <= half - step / 2) { out.push(-k * step); out.push(k * step) } }
+    for (let k = 1; k <= max; k++) { if (k * step <= half - 3) { out.push(-k * step); out.push(k * step) } }
     return out.sort((a, b) => a - b)
   }
   const maxHW = Math.max(...boxes.map(b => b.hw)), maxHH = Math.max(...boxes.map(b => b.hh))
@@ -677,7 +677,7 @@ function routeAll(
     const out: Slot[] = []
     for (const off of portX) {
       const x = b.x + off
-      if (Math.abs(off) > b.hw - 4 || !xIndex.has(x)) continue
+      if (Math.abs(off) > b.hw - 3 || !xIndex.has(x)) continue
       const ix = xIndex.get(x)!
       const upY = ys[upperBound(ys, ib.y - ib.hh) - 1]
       const downY = ys[lowerBound(ys, ib.y + ib.hh)]
@@ -686,7 +686,7 @@ function routeAll(
     }
     for (const off of portY) {
       const y = b.y + off
-      if (Math.abs(off) > b.hh - 4 || !yIndex.has(y)) continue
+      if (Math.abs(off) > b.hh - 3 || !yIndex.has(y)) continue
       const iy = yIndex.get(y)!
       const leftX = xs[upperBound(xs, ib.x - ib.hw) - 1]
       const rightX = xs[lowerBound(xs, ib.x + ib.hw)]
