@@ -55,7 +55,9 @@ interactive popovers. The 0.8.1 entries below were never published, so they ship
   edges without their own `curvature`; 0 draws them straight.
 - **`GraphCanvas`** — `nodePopover` / `edgePopover` render props: interactive content in a
   `role="dialog"` popover anchored to a clicked or focused node or edge, tracking pan and zoom,
-  closed on Escape, background click or click outside.
+  closed on Escape, background click or click outside. Opening moves focus to the popover's
+  first focusable element; Escape closes it from anywhere in the canvas, including while focus
+  is still on the node or edge (content with nothing focusable, such as a click tooltip).
 - **`GraphCanvas`** — `renderNode` receives a fourth argument, `props: { nodeId, tooltipId,
   onSelect, onPopoverOpen }`. A custom renderer must call `onPopoverOpen(element)` on click when
   it is defined, or `nodePopover` and click-triggered tooltips never open; `tooltipId` is the id
@@ -67,7 +69,8 @@ interactive popovers. The 0.8.1 entries below were never published, so they ship
   links. Node and edge tooltips are now wired to their targets with `aria-describedby`.
 - **`Popover`** — new compound component (`Popover`, `Popover.Trigger`, `Popover.Panel`) for
   interactive, accessible content: controlled (`open` + `onOpenChange`) or uncontrolled,
-  `placement`, `offset`, `disableOutsideClick`, `panelId`.
+  `placement`, `offset`, `disableOutsideClick`, `panelId`, and `autoFocus` (move focus to the
+  panel's first focusable element on open; default `false`).
 - **`GraphCollapseControl`** — the collapse/expand button GraphCanvas shows beside a hovered node
   that has structural children, exported for custom overlays.
 - **`Tooltip`** — `id` prop, so a trigger elsewhere in the DOM can reference it with

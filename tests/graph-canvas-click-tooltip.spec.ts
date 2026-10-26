@@ -72,23 +72,20 @@ test.describe("integration: GraphCanvas Click-Triggered Tooltips", () => {
       await nucleusNode.dispatchEvent("pointerout");
     });
 
-    test.skip("nodeTooltipTrigger='click' popover closes when Escape key is pressed", async ({
+    test("nodeTooltipTrigger='click' popover closes when Escape key is pressed", async ({
       page,
     }) => {
-      // Escape key handling is tested in graph-canvas-popover.spec.ts
-      // This test is skipped to focus on click-trigger-specific behavior
+      // Plain-text tooltip content has nothing focusable, so focus stays on the node and
+      // Escape has to be handled by the canvas rather than the popover panel.
       const cellNode = page.locator('[data-testid="graph-node-cls_cell"]');
       await cellNode.click();
 
       const popover = page.locator('[role="dialog"]');
       await expect(popover).toBeVisible();
+      await expect(cellNode.locator(".graph-node")).toBeFocused();
 
-      // Focus the popover and then press Escape key
-      await popover.focus();
       await page.keyboard.press("Escape");
-
-      // Popover should hide
-      await expect(popover).not.toBeVisible();
+      await expect(popover).toHaveCount(0);
     });
 
     test("nodeTooltipTrigger='click' popover closes when clicking canvas background", async ({
@@ -120,6 +117,7 @@ test.describe("integration: GraphCanvas Click-Triggered Tooltips", () => {
       const popover = page.locator('[role="dialog"]');
       await expect(popover).toBeVisible();
       const before = await popover.boundingBox();
+      expect(before).not.toBeNull();
 
       // Zoom the canvas
       await page.locator(".graph-canvas").evaluate((el) => {
@@ -132,14 +130,16 @@ test.describe("integration: GraphCanvas Click-Triggered Tooltips", () => {
         );
       });
 
-      // Popover should still be visible and repositioned
+      // Wheel zoom is applied on the next animation frame, so poll for the move.
       await expect(popover).toBeVisible();
-      const after = await popover.boundingBox();
-      if (before && after) {
-        expect(
-          Math.abs(after.x - before.x) + Math.abs(after.y - before.y),
-        ).toBeGreaterThan(1);
-      }
+      await expect
+        .poll(async () => {
+          const after = await popover.boundingBox();
+          return after && before
+            ? Math.abs(after.x - before.x) + Math.abs(after.y - before.y)
+            : 0;
+        })
+        .toBeGreaterThan(1);
     });
   });
 
@@ -183,23 +183,22 @@ test.describe("integration: GraphCanvas Click-Triggered Tooltips", () => {
       await edge.dispatchEvent("pointerout");
     });
 
-    test.skip("edgeTooltipTrigger='click' popover closes when Escape key is pressed", async ({
+    test("edgeTooltipTrigger='click' popover closes when Escape key is pressed", async ({
       page,
     }) => {
-      // Escape key handling is tested in graph-canvas-popover.spec.ts
-      // This test is skipped to focus on click-trigger-specific behavior
+      // Keyboard flow: open from the focused edge with Enter, close with Escape. The content has
+      // nothing focusable, so focus stays on the edge throughout.
       const edge = page.locator('[data-testid="graph-edge-edge_1"]');
-      await edge.locator(".graph-edge__hit").dispatchEvent("click");
+      await edge.focus();
+      await page.keyboard.press("Enter");
 
       const popover = page.locator('[role="dialog"]');
       await expect(popover).toBeVisible();
+      await expect(edge).toBeFocused();
 
-      // Focus the popover and then press Escape key
-      await popover.focus();
       await page.keyboard.press("Escape");
-
-      // Popover should hide
-      await expect(popover).not.toBeVisible();
+      await expect(popover).toHaveCount(0);
+      await expect(edge).toBeFocused();
     });
 
     test("edgeTooltipTrigger='click' popover displays weight when present", async ({
@@ -222,6 +221,7 @@ test.describe("integration: GraphCanvas Click-Triggered Tooltips", () => {
       const popover = page.locator('[role="dialog"]');
       await expect(popover).toBeVisible();
       const before = await popover.boundingBox();
+      expect(before).not.toBeNull();
 
       // Zoom the canvas significantly
       await page.locator(".graph-canvas").evaluate((el) => {
@@ -234,16 +234,16 @@ test.describe("integration: GraphCanvas Click-Triggered Tooltips", () => {
         );
       });
 
-      await page.waitForTimeout(100);
-
-      // Popover should still be visible and repositioned
+      // Wheel zoom is applied on the next animation frame, so poll for the move.
       await expect(popover).toBeVisible();
-      const after = await popover.boundingBox();
-      if (before && after) {
-        expect(
-          Math.abs(after.x - before.x) + Math.abs(after.y - before.y),
-        ).toBeGreaterThan(1);
-      }
+      await expect
+        .poll(async () => {
+          const after = await popover.boundingBox();
+          return after && before
+            ? Math.abs(after.x - before.x) + Math.abs(after.y - before.y)
+            : 0;
+        })
+        .toBeGreaterThan(1);
     });
 
     test("edgeTooltipTrigger='click' popover closes when clicking canvas background", async ({

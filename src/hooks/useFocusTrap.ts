@@ -11,6 +11,12 @@ const FOCUSABLE_SELECTORS = [
 
 export interface UseFocusTrapOptions {
   mode?: 'modal' | 'popup'
+  /**
+   * Focus the first focusable element when the trap activates. Default: true in 'modal' mode,
+   * false in 'popup' mode. Doing this here, in the same effect whose cleanup restores focus,
+   * keeps the hand-off correct when React StrictMode re-runs the effect on mount.
+   */
+  initialFocus?: boolean
 }
 
 export function useFocusTrap(
@@ -20,6 +26,7 @@ export function useFocusTrap(
 ) {
   const previousActiveElementRef = useRef<HTMLElement | null>(null)
   const mode = options?.mode ?? 'modal'
+  const initialFocus = options?.initialFocus ?? mode === 'modal'
 
   useEffect(() => {
     if (!isActive || !ref.current) return
@@ -56,7 +63,7 @@ export function useFocusTrap(
     }
 
     const initialFocusableElements = getFocusableElements()
-    if (initialFocusableElements.length > 0 && mode === 'modal') {
+    if (initialFocusableElements.length > 0 && initialFocus) {
       initialFocusableElements[0].focus()
     }
 
@@ -69,5 +76,5 @@ export function useFocusTrap(
         previousElement.focus()
       }
     }
-  }, [ref, isActive, mode])
+  }, [ref, isActive, mode, initialFocus])
 }

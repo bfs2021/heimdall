@@ -1,5 +1,13 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, type Page } from '@playwright/test'
 import { freezeAnimations, loadSelfHostedFonts, assertFontsLoaded, applyDarkCanvasMode } from './utils/test-helpers'
+
+// The test page's toast auto-dismisses after Toast's default 4s, which a slow CI runner can
+// outlast before the screenshot is taken. Pause the page clock first so its timer never fires.
+async function openToastWithClockPaused(page: Page) {
+  await page.clock.install()
+  await page.clock.pauseAt(Date.now() + 1000)
+  await page.locator('button:has-text("Show Toast")').first().click()
+}
 
 test.describe('integration: Overlay Components', () => {
   test.beforeEach(async ({ page }) => {
@@ -330,9 +338,7 @@ test.describe('integration: Overlay Components', () => {
 
   test.describe('Toast Component', () => {
     test('should render when isOpen is true', async ({ page }) => {
-      // Find and click the trigger button for toast
-      const toastTrigger = page.locator('button:has-text("Show Toast")').first()
-      await toastTrigger.click()
+      await openToastWithClockPaused(page)
 
       // Toast should be visible
       const toast = page.locator('[role="status"]').first()
@@ -557,8 +563,7 @@ test.describe('integration: Overlay Components', () => {
     })
 
     test('toast dark snapshot', async ({ page }) => {
-      const toastTrigger = page.locator('button:has-text("Show Toast")').first()
-      await toastTrigger.click()
+      await openToastWithClockPaused(page)
       const toast = page.locator('[role="status"]').first()
       await expect(toast).toBeVisible()
       await freezeAnimations(page)
