@@ -192,6 +192,10 @@ export default function UxNavigationTestPage() {
         edges={edgesWithCurvature as any}
         layout="ux-navigation"
         isPageNode={(node) => (node as NodeData).kind === 'P'}
+        // Without this GraphCanvas treats no edge as structural for ux-navigation (its default
+        // is layout !== 'ux-navigation'), so every node became its own one-node tree and the
+        // page never showed a tree or a fan (the snapshots were of that degenerate render).
+        isStructuralEdge={(edge) => !!(edge as EdgeData).structural}
         isNavigationRoute={(edge) => !(edge as EdgeData).structural}
         selectedNodeId={selectedNodeId}
         onNodeSelect={handleNodeSelect}
