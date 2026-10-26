@@ -9,6 +9,96 @@ test.describe('integration: MapCanvas Component', () => {
     await assertFontsLoaded(page)
   })
 
+  // tinkermonkey/heimdall#296: the initial view must fit the data. It used to open on an empty
+  // grid at the top-left of the world with every pin off-screen, and the screenshots captured that.
+  test.describe('Initial fit', () => {
+    async function readStatus(page: import('@playwright/test').Page) {
+      const text = (await page.locator(':text("Center:")').textContent()) ?? ''
+      const m = text.match(/Center: ([-\d.]+), ([-\d.]+) \| Zoom: ([\d.]+)/)
+      return m ? { lat: Number(m[1]), lng: Number(m[2]), zoom: Number(m[3]) } : null
+    }
+
+    async function allInsideCanvas(page: import('@playwright/test').Page, selector: string) {
+      const canvas = await page.locator('.map-canvas').boundingBox()
+      const boxes = await page.locator(selector).evaluateAll((els) =>
+        els.map((el) => {
+          const r = el.getBoundingClientRect()
+          return { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
+        })
+      )
+      expect(canvas).not.toBeNull()
+      expect(boxes.length).toBeGreaterThan(0)
+      return boxes.every(
+        (b) => b.left >= canvas!.x && b.right <= canvas!.x + canvas!.width && b.top >= canvas!.y && b.bottom <= canvas!.y + canvas!.height
+      )
+    }
+
+    test('pins mode frames every pin and reports a centre between them', async ({ page }) => {
+      expect(await allInsideCanvas(page, '.map-pin')).toBe(true)
+      // Sample pins span New York to Berlin.
+      const status = await readStatus(page)
+      expect(status).not.toBeNull()
+      expect(status!.lat).toBeGreaterThan(40.7)
+      expect(status!.lat).toBeLessThan(52.5)
+      expect(status!.lng).toBeGreaterThan(-74)
+      expect(status!.lng).toBeLessThan(13.4)
+      expect(status!.zoom).toBe(1)
+    })
+
+    test('track mode frames the track', async ({ page }) => {
+      await page.locator('button:has-text("Track Mode")').click()
+      expect(await allInsideCanvas(page, '.map-track__line')).toBe(true)
+    })
+
+    test('heatmap mode frames every point', async ({ page }) => {
+      await page.locator('button:has-text("Heatmap Mode")').click()
+      expect(await allInsideCanvas(page, '.map-heatmap circle')).toBe(true)
+    })
+
+    test('wheel zoom at the centre keeps the view centre and scales distances by the zoom factor', async ({ page }) => {
+      const pinCenter = async (label: string) => {
+        const b = await page.locator('.map-pin', { hasText: label }).boundingBox()
+        return { x: b!.x + b!.width / 2, y: b!.y + b!.height / 2 }
+      }
+      const gap = async () => {
+        const a = await pinCenter('NYC')
+        const b = await pinCenter('BER')
+        return Math.hypot(a.x - b.x, a.y - b.y)
+      }
+      const before = await readStatus(page)
+      const gapBefore = await gap()
+
+      // Wheel zoom anchors on the cursor, so with the cursor at the canvas centre the reported
+      // centre must not move. (Keyboard zoom anchors on the top-left corner instead.)
+      const canvas = (await page.locator('.map-canvas').boundingBox())!
+      await page.mouse.move(canvas.x + canvas.width / 2, canvas.y + canvas.height / 2)
+      await page.mouse.wheel(0, -300)
+      await expect.poll(async () => (await readStatus(page))?.zoom).toBeGreaterThan(before!.zoom)
+      await page.waitForTimeout(200)
+
+      const after = await readStatus(page)
+      expect(after!.lat).toBeCloseTo(before!.lat, 1)
+      expect(after!.lng).toBeCloseTo(before!.lng, 1)
+      const scaled = (await gap()) / gapBefore
+      // The status shows zoom to one decimal, so compare loosely.
+      expect(scaled).toBeGreaterThan(after!.zoom / before!.zoom - 0.06)
+      expect(scaled).toBeLessThan(after!.zoom / before!.zoom + 0.06)
+    })
+
+    test('a caller re-rendering from onViewportChange does not loop', async ({ page }) => {
+      // The test page sets state in an inline onViewportChange. usePanZoom used to re-fire the
+      // callback whenever its identity changed, so this rendered forever.
+      const warnings: string[] = []
+      page.on('console', (msg) => {
+        if (msg.type() === 'error' && msg.text().includes('Maximum update depth')) warnings.push(msg.text())
+      })
+      await page.reload()
+      await page.waitForLoadState('networkidle')
+      await page.waitForTimeout(500)
+      expect(warnings).toEqual([])
+    })
+  })
+
   test.describe('Grid Fallback Rendering', () => {
     test('should render grid pattern without tiles', async ({ page }) => {
       const gridRect = page.locator('.map-grid')
