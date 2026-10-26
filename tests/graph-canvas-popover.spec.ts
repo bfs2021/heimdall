@@ -100,6 +100,7 @@ test.describe("integration: GraphCanvas Popover Components", () => {
       const popover = page.locator('[data-testid="node-popover-cls_cell"]');
       await expect(popover).toBeVisible();
       const before = await popover.boundingBox();
+      expect(before).not.toBeNull();
 
       // Zoom the canvas
       await page.locator(".graph-canvas").evaluate((el) => {
@@ -112,12 +113,16 @@ test.describe("integration: GraphCanvas Popover Components", () => {
         );
       });
 
-      // Popover should still be visible and repositioned
+      // Wheel zoom is applied on the next animation frame, so poll for the move.
       await expect(popover).toBeVisible();
-      const after = await popover.boundingBox();
-      if (before && after) {
-        expect(Math.abs(after.x - before.x) + Math.abs(after.y - before.y)).toBeGreaterThan(1);
-      }
+      await expect
+        .poll(async () => {
+          const after = await popover.boundingBox();
+          return after && before
+            ? Math.abs(after.x - before.x) + Math.abs(after.y - before.y)
+            : 0;
+        })
+        .toBeGreaterThan(1);
     });
   });
 
@@ -217,6 +222,22 @@ test.describe("integration: GraphCanvas Popover Components", () => {
 
       // Popover should hide
       await expect(popover).not.toBeVisible();
+    });
+
+    test("nodePopover has focus in its panel as soon as it is visible", async ({ page }) => {
+      const cellNode = page.locator('[data-testid="graph-node-cls_cell"]');
+      await cellNode.click();
+
+      const popover = page.locator('[data-testid="node-popover-cls_cell"]');
+      await expect(popover).toBeVisible();
+
+      // Read focus once, without polling: an Escape pressed at this moment goes wherever
+      // focus is right now, so it must already be inside the panel.
+      const focusInPanel = await page.evaluate(
+        () => !!document.getElementById("popover-node-cls_cell")?.contains(document.activeElement),
+      );
+      expect(focusInPanel).toBe(true);
+      await expect(popover.locator('[data-testid="node-popover-action-cls_cell"]')).toBeFocused();
     });
 
     test("edgePopover closes when Escape key is pressed", async ({ page }) => {
