@@ -1,5 +1,4 @@
 import { Delaunay } from 'd3-delaunay'
-import { packSiblings } from 'd3-hierarchy'
 import type { LayoutNode, LayoutEdge } from './graphLayout'
 
 /**
@@ -18,7 +17,8 @@ import type { LayoutNode, LayoutEdge } from './graphLayout'
  *   5. overlap removal: GTree-style growing tree over the Delaunay triangulation, looped until a
  *      pairwise scan finds no overlap, with a shape-preserving scale-up as the terminating
  *      fallback — so zero overlap and the minimum node distance are hard post-conditions.
- *   6. components packed with d3.packSiblings (cold start only).
+ *   6. components shelf-packed into a block of roughly the viewport's aspect, isolated nodes as
+ *      one grid block beneath them (cold start only).
  *   7. Procrustes alignment to the supplied positions (warm start with scope 'all').
  *
  * Warm start. Node x/y are the start positions. They are a *sketch* only when at least 70% of
@@ -637,28 +637,99 @@ function bbox(boxes: Box[]): { cx: number; cy: number; w: number; h: number } {
   return { cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, w: maxX - minX, h: maxY - minY }
 }
 
+// Viewport aspect the component packing targets (GraphCanvas fits the whole layout to the view,
+// so the packed arrangement should have roughly the view's shape, not a disc's).
+const PACK_ASPECT = 1.6
+
+/** Shelf-pack rectangles (largest first) into rows no wider than `maxW`; returns row-relative offsets. */
+function shelfPack(rects: Array<{ w: number; h: number }>, maxW: number, pad: number): { offsets: Pt[]; w: number; h: number } {
+  const offsets: Pt[] = rects.map(() => ({ x: 0, y: 0 }))
+  const rows: Array<{ items: number[]; w: number; h: number }> = []
+  rects.forEach((r, i) => {
+    const row = rows[rows.length - 1]
+    if (row && row.w + pad + r.w <= maxW) {
+      offsets[i] = { x: row.w + pad, y: 0 }
+      row.items.push(i); row.w += pad + r.w; row.h = Math.max(row.h, r.h)
+    } else {
+      rows.push({ items: [i], w: r.w, h: r.h })
+      offsets[i] = { x: 0, y: 0 }
+    }
+  })
+  const totalW = Math.max(...rows.map(r => r.w))
+  let y = 0
+  for (const row of rows) {
+    const inset = (totalW - row.w) / 2 // rows are centered, so the block reads as one shape
+    for (const i of row.items) { offsets[i].x += inset; offsets[i].y = y + (row.h - rects[i].h) / 2 }
+    y += row.h + pad
+  }
+  return { offsets, w: totalW, h: y - pad }
+}
+
+/**
+ * Stage 6: cold-start component arrangement. Connected components are shelf-packed as
+ * rectangles into a block of roughly PACK_ASPECT shape (largest first, rows centered), and
+ * isolated nodes form one compact grid block beneath them (vision item 13) instead of orbiting
+ * the main component as circle-packed singletons. Components anchored by a pinned node keep
+ * their absolute place; the packed block sits to their right when the two would collide.
+ */
 function packComponents(components: number[][], boxes: Box[], pos: Pt[], pinned: boolean[], gap: number, spacing: number): void {
   const anchored = components.filter(m => m.some(i => pinned[i]))
   const free = components.filter(m => !m.some(i => pinned[i]))
   if (free.length === 0) return
   const pad = Math.max(gap, spacing)
-  if (free.length === 1 && anchored.length === 0) {
-    const bb = bbox(free[0].map(g => boxes[g]))
-    for (const g of free[0]) { pos[g].x -= bb.cx; pos[g].y -= bb.cy }
-    return
+  const multi = free.filter(m => m.length > 1)
+  const singles = free.filter(m => m.length === 1).map(m => m[0])
+  const moveTo = (members: number[], bb: { cx: number; cy: number }, x: number, y: number) => {
+    for (const g of members) { pos[g].x += x - bb.cx; pos[g].y += y - bb.cy }
   }
-  const circles = free.map((m, i) => {
-    const bb = bbox(m.map(g => boxes[g]))
-    return { i, bb, r: Math.hypot(bb.w, bb.h) / 2 + pad / 2, x: 0, y: 0 }
-  })
-  circles.sort((a, b) => b.r - a.r || a.i - b.i)
-  packSiblings(circles)
-  for (const c of circles) for (const g of free[c.i]) { pos[g].x += c.x - c.bb.cx; pos[g].y += c.y - c.bb.cy }
-  if (anchored.length === 0) return
-  // Components anchored by pins keep their absolute place; the packed group sits to their right
-  // when the two would otherwise collide.
-  const anchoredBb = bbox(anchored.flat().map(g => boxes[g]))
+
+  // Connected components: rectangles, tallest first (ties by width, then by the component's
+  // lowest member index — components are already in deterministic id order).
+  const rects = multi.map((m, i) => { const bb = bbox(m.map(g => boxes[g])); return { i, m, bb, w: bb.w, h: bb.h } })
+  rects.sort((a, b) => b.h - a.h || b.w - a.w || a.i - b.i)
+  let blockW = 0, blockH = 0
+  if (rects.length) {
+    const area = rects.reduce((s, r) => s + (r.w + pad) * (r.h + pad), 0)
+    const widest = Math.max(...rects.map(r => r.w))
+    // Try a few target widths around the aspect-ideal one and keep the arrangement that fits a
+    // PACK_ASPECT view best (largest common scale), ties to the narrower target.
+    let best: { offsets: Pt[]; w: number; h: number } | undefined
+    let bestScore = -Infinity
+    for (const f of [0.75, 1, 1.25, 1.5, 2]) {
+      const packed = shelfPack(rects, Math.max(widest, Math.sqrt(area * PACK_ASPECT) * f), pad)
+      const score = Math.min(PACK_ASPECT / packed.w, 1 / packed.h)
+      if (score > bestScore + 1e-12) { bestScore = score; best = packed }
+    }
+    const { offsets, w, h } = best!
+    rects.forEach((r, i) => moveTo(r.m, r.bb, offsets[i].x + r.w / 2, offsets[i].y + r.h / 2))
+    blockW = w; blockH = h
+  }
+
+  // Isolated nodes: one grid block below the components, as wide as they are (or, with no
+  // connected component, a block of PACK_ASPECT shape on its own).
+  if (singles.length) {
+    const cellW = Math.max(...singles.map(g => boxes[g].w)) + pad
+    const cellH = Math.max(...singles.map(g => boxes[g].h)) + pad
+    const cols = rects.length
+      ? Math.max(1, Math.min(singles.length, Math.floor((blockW + pad) / cellW)))
+      : Math.max(1, Math.min(singles.length, Math.ceil(Math.sqrt((singles.length * PACK_ASPECT * cellH) / cellW))))
+    const rows = Math.ceil(singles.length / cols)
+    const gridW = cols * cellW - pad
+    const y0 = rects.length ? blockH + pad : 0
+    singles.forEach((g, k) => {
+      const col = k % cols, row = Math.floor(k / cols)
+      pos[g].x = (blockW - gridW) / 2 + col * cellW + (cellW - pad) / 2
+      pos[g].y = y0 + row * cellH + (cellH - pad) / 2
+    })
+    blockW = Math.max(blockW, gridW)
+    blockH = y0 + rows * cellH - pad
+  }
+
+  // Center the whole packed block on the origin.
   const packed = free.flat()
+  for (const g of packed) { pos[g].x -= blockW / 2; pos[g].y -= blockH / 2 }
+  if (anchored.length === 0) return
+  const anchoredBb = bbox(anchored.flat().map(g => boxes[g]))
   const packedBb = bbox(packed.map(g => ({ ...boxes[g], x: pos[g].x, y: pos[g].y })))
   const overlapX = Math.abs(packedBb.cx - anchoredBb.cx) < (packedBb.w + anchoredBb.w) / 2 + pad
   const overlapY = Math.abs(packedBb.cy - anchoredBb.cy) < (packedBb.h + anchoredBb.h) / 2 + pad
