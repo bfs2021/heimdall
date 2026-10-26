@@ -30,6 +30,8 @@ export interface KanbanBoardProps extends React.HTMLAttributes<HTMLDivElement> {
   cards: KanbanCard[]
   selectedId?: string
   onSelectCard?: (cardId: string) => void
+  /** Called when a card is dropped or moved with the keyboard. `index` is the card's final
+   *  position in `toColumnId` once it has been removed from its old place, for every input method. */
   onMoveCard: (cardId: string, toColumnId: string, index: number) => void
   renderCard?: (card: KanbanCard, isSelected: boolean) => React.ReactNode
 }
@@ -319,8 +321,16 @@ export const KanbanBoard = React.forwardRef<HTMLDivElement, KanbanBoardProps>(
           if (toColumn && fromColumn) {
             const card = cards.find((c) => c.id === state.cardId)
             if (card) {
-              onMoveCard(state.cardId, hoveredColumnId, insertionIndex)
-              announceMove(card.title, toColumn.title, insertionIndex)
+              // insertionIndex is a slot among the column's rendered cards, which still include
+              // the dragged card in its original place. Below that place in its own column, the
+              // slot is one past the card's final position; report the final position, the same
+              // as keyboard moves and cross-column drops do.
+              const finalIndex =
+                hoveredColumnId === state.sourceColumnId && insertionIndex > state.sourceIndex
+                  ? insertionIndex - 1
+                  : insertionIndex
+              onMoveCard(state.cardId, hoveredColumnId, finalIndex)
+              announceMove(card.title, toColumn.title, finalIndex)
             }
           }
         }

@@ -133,10 +133,14 @@ export function usePanZoom({
     panRef.current = pan
   }, [pan])
 
-  // Notify viewport changes
+  // Notify viewport changes. The callback is read through a ref so a new function identity
+  // (an inline arrow in the caller) doesn't re-fire it: a caller that sets state from it would
+  // otherwise re-render, pass a new callback, and loop forever.
+  const onViewportChangeRef = useRef(onViewportChange)
+  onViewportChangeRef.current = onViewportChange
   useEffect(() => {
-    onViewportChange?.({ x: pan.x, y: pan.y, zoom })
-  }, [pan, zoom, onViewportChange])
+    onViewportChangeRef.current?.({ x: pan.x, y: pan.y, zoom })
+  }, [pan, zoom])
 
   const clampPan = useCallback(
     (panX: number, panY: number): { x: number; y: number } => {

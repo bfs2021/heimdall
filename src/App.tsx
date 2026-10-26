@@ -42,6 +42,7 @@ import VersionTimelineTestPage from './test-pages/VersionTimelineTestPage'
 import TraceViewerTestPage from './test-pages/TraceViewerTestPage'
 import UxNavigationTestPage from './test-pages/UxNavigationTestPage'
 import RadialTreeTestPage from './test-pages/RadialTreeTestPage'
+import LineChartDataToggleTestPage from './test-pages/LineChartDataToggleTestPage'
 // Injected by vite.config.mjs from package.json (a JSON import here would pull package.json into
 // the declaration build and move every .d.ts under dist/src/).
 declare const __HEIMDALL_VERSION__: string
@@ -170,6 +171,10 @@ export default function App() {
 
   if (exampleParam === 'calendar-test') {
     return <CalendarTestPage />
+  }
+
+  if (exampleParam === 'line-chart-data-toggle') {
+    return <LineChartDataToggleTestPage />
   }
 
   if (exampleParam === 'kanban-board') {

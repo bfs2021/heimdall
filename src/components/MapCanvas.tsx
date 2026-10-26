@@ -6,6 +6,16 @@ import './MapCanvas.css'
 
 // ─── Mercator Projection ──────────────────────────────────────────────────────
 
+const MAX_LAT = 85.05112878
+/** Projection zoom before the first fit runs. */
+const DEFAULT_BASE_ZOOM = 2
+/** Padding in px kept around the data by the initial fit (reduced in small containers). */
+const FIT_PADDING = 60
+/** Initial zoom for a single point, or several at the same spot. */
+const SINGLE_POINT_ZOOM = 12
+/** The initial fit never zooms in further than this, so tightly clustered data keeps context. */
+const MAX_FIT_ZOOM = 16
+
 function latLngToPixels(lat: number, lng: number, zoom: number): { x: number; y: number } {
   const n = Math.pow(2, zoom)
   const x = ((lng + 180) / 360) * n * 256
@@ -187,9 +197,18 @@ export const MapCanvas = React.forwardRef<HTMLDivElement, MapCanvasProps>(
     const [containerSize, setContainerSize] = useState<{ width: number; height: number } | null>(null)
     const [selectedPopover, setSelectedPopover] = useState<{ x: number; y: number } | null>(null)
     const didInitRef = useRef(false)
+    // Content is projected once, at this Web Mercator zoom level (fractional allowed), chosen so
+    // the data fits the container at pan/zoom scale 1. Pan/zoom then only scales that fixed
+    // projection, so zooming is continuous. A ref mirrors it for the viewport callback.
+    const [baseZoom, setBaseZoom] = useState(DEFAULT_BASE_ZOOM)
+    const baseZoomRef = useRef(DEFAULT_BASE_ZOOM)
 
     const handleViewportChange = useCallback((vp: { x: number; y: number; zoom: number }) => {
-      const center = pixelsToLatLng(vp.x / vp.zoom, vp.y / vp.zoom, Math.round(vp.zoom * 4))
+      // Report the map point under the middle of the view (vp.x/vp.y are the pan offset).
+      const el = containerRef.current
+      const width = el?.clientWidth ?? 0
+      const height = el?.clientHeight ?? 0
+      const center = pixelsToLatLng((width / 2 - vp.x) / vp.zoom, (height / 2 - vp.y) / vp.zoom, baseZoomRef.current)
       onViewportChange?.({
         center: { lat: center.lat, lng: center.lng },
         zoom: vp.zoom,
@@ -217,10 +236,10 @@ export const MapCanvas = React.forwardRef<HTMLDivElement, MapCanvasProps>(
       return () => ro.disconnect()
     }, [])
 
-    // Initialize bounds on first render
+    // Fit the data (or `bounds`) on first render: choose the projection zoom that frames it with
+    // padding at scale 1, then pan its center to the middle of the container.
     useEffect(() => {
       if (didInitRef.current || !containerSize) return
-      if (!bounds && pins.length === 0 && trackPoints.length === 0 && heatmapData.length === 0) return
 
       const items = [
         ...pins.map((p) => ({ lat: p.lat, lng: p.lng })),
@@ -228,10 +247,9 @@ export const MapCanvas = React.forwardRef<HTMLDivElement, MapCanvasProps>(
         ...heatmapData.map((h) => ({ lat: h.lat, lng: h.lng })),
       ]
 
-      // Convert bounds tuple to object format, or derive from items
-      let boundsToUse: { north: number; south: number; east: number; west: number } | null = null
+      let box: { north: number; south: number; east: number; west: number }
       if (bounds) {
-        boundsToUse = {
+        box = {
           north: Math.max(bounds[0].lat, bounds[1].lat),
           south: Math.min(bounds[0].lat, bounds[1].lat),
           east: Math.max(bounds[0].lng, bounds[1].lng),
@@ -240,56 +258,36 @@ export const MapCanvas = React.forwardRef<HTMLDivElement, MapCanvasProps>(
       } else if (items.length > 0) {
         const lats = items.map((i) => i.lat)
         const lngs = items.map((i) => i.lng)
-        boundsToUse = {
-          north: Math.max(...lats),
-          south: Math.min(...lats),
-          east: Math.max(...lngs),
-          west: Math.min(...lngs),
-        }
+        box = { north: Math.max(...lats), south: Math.min(...lats), east: Math.max(...lngs), west: Math.min(...lngs) }
+      } else {
+        // Nothing to fit: show the whole world.
+        box = { north: MAX_LAT, south: -MAX_LAT, east: 180, west: -180 }
       }
 
-      if (!boundsToUse) return
+      const { width, height } = containerSize
+      const padding = Math.min(FIT_PADDING, width / 4, height / 4)
+      // Extent in pixels at zoom 0 (a 256px world); scaling by 2^z gives the extent at zoom z.
+      const nw = latLngToPixels(box.north, box.west, 0)
+      const se = latLngToPixels(box.south, box.east, 0)
+      const extentW = Math.abs(se.x - nw.x)
+      const extentH = Math.abs(se.y - nw.y)
 
-      // Fit bounds: add padding and calculate zoom
-      const padding = 60
-      const northPixel = latLngToPixels(boundsToUse.north, boundsToUse.west, 10).y
-      const southPixel = latLngToPixels(boundsToUse.south, boundsToUse.east, 10).y
-      const westPixel = latLngToPixels(boundsToUse.north, boundsToUse.west, 10).x
-      const eastPixel = latLngToPixels(boundsToUse.north, boundsToUse.east, 10).x
-
-      const height = Math.abs(southPixel - northPixel)
-      const width = Math.abs(eastPixel - westPixel)
-
-      // Handle edge cases: zero dimensions or container too small
-      if (height === 0 || width === 0 || containerSize.height <= padding * 2 || containerSize.width <= padding * 2) {
-        // Fall back to a default zoom level
-        panTo(containerSize.width / 2, containerSize.height / 2)
-        didInitRef.current = true
-        return
+      let z: number
+      if (extentW === 0 && extentH === 0) {
+        z = SINGLE_POINT_ZOOM
+      } else {
+        const fitW = extentW > 0 ? Math.log2((width - 2 * padding) / extentW) : Infinity
+        const fitH = extentH > 0 ? Math.log2((height - 2 * padding) / extentH) : Infinity
+        z = Math.min(fitW, fitH)
       }
+      z = Math.max(0, Math.min(MAX_FIT_ZOOM, Number.isFinite(z) ? z : SINGLE_POINT_ZOOM))
 
-      const zoomH = Math.log2((containerSize.height - padding * 2) / height)
-      const zoomW = Math.log2((containerSize.width - padding * 2) / width)
-
-      // Ensure zoom is valid (not NaN, not Infinity)
-      if (!Number.isFinite(zoomH) || !Number.isFinite(zoomW)) {
-        panTo(containerSize.width / 2, containerSize.height / 2)
-        didInitRef.current = true
-        return
-      }
-
-      const calculatedZoom = Math.max(minZoom, Math.min(maxZoom, Math.floor(Math.min(zoomH, zoomW))))
-
-      const centerLat = (boundsToUse.north + boundsToUse.south) / 2
-      const centerLng = (boundsToUse.east + boundsToUse.west) / 2
-      const centerPixel = latLngToPixels(centerLat, centerLng, calculatedZoom)
-
-      const panX = containerSize.width / 2 - centerPixel.x * calculatedZoom
-      const panY = containerSize.height / 2 - centerPixel.y * calculatedZoom
-
-      panTo(panX, panY)
+      const center = latLngToPixels((box.north + box.south) / 2, (box.east + box.west) / 2, z)
+      baseZoomRef.current = z
+      setBaseZoom(z)
+      panTo(width / 2 - center.x, height / 2 - center.y)
       didInitRef.current = true
-    }, [containerSize, bounds, pins.length, trackPoints.length, heatmapData.length, minZoom, maxZoom, panTo])
+    }, [containerSize, bounds, pins, trackPoints, heatmapData, panTo])
 
     const handlePointerDown = useCallback(
       (e: React.PointerEvent<HTMLDivElement>) => {
@@ -310,7 +308,7 @@ export const MapCanvas = React.forwardRef<HTMLDivElement, MapCanvasProps>(
       return (
         <div className="map-pins" data-testid="map-pins" style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}>
           {pins.map((pin) => {
-            const pixel = latLngToPixels(pin.lat, pin.lng, Math.round(viewport.zoom * 4))
+            const pixel = latLngToPixels(pin.lat, pin.lng, baseZoom)
             const screenX = viewport.x + pixel.x * viewport.zoom
             const screenY = viewport.y + pixel.y * viewport.zoom
 
@@ -344,12 +342,12 @@ export const MapCanvas = React.forwardRef<HTMLDivElement, MapCanvasProps>(
           })}
         </div>
       )
-    }, [mode, pins, viewport.zoom, viewport.x, viewport.y, selectedPinId, onSelectPin])
+    }, [mode, pins, baseZoom, viewport.zoom, viewport.x, viewport.y, selectedPinId, onSelectPin])
 
     const renderTrack = useCallback(() => {
       if (mode !== 'track' || !trackPoints.length) return null
 
-      const points = trackPoints.map((p) => latLngToPixels(p.lat, p.lng, Math.round(viewport.zoom * 4)))
+      const points = trackPoints.map((p) => latLngToPixels(p.lat, p.lng, baseZoom))
       const pathData = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ')
 
       return (
@@ -357,7 +355,7 @@ export const MapCanvas = React.forwardRef<HTMLDivElement, MapCanvasProps>(
           <path d={pathData} className="map-track__line" />
         </g>
       )
-    }, [mode, trackPoints, viewport.zoom])
+    }, [mode, trackPoints, baseZoom])
 
     const renderHeatmap = useCallback(() => {
       if (mode !== 'heatmap' || !heatmapData.length) return null
@@ -369,7 +367,7 @@ export const MapCanvas = React.forwardRef<HTMLDivElement, MapCanvasProps>(
       return (
         <g className="map-heatmap" data-testid="map-heatmap">
           {heatmapData.map((point, i) => {
-            const pixel = latLngToPixels(point.lat, point.lng, Math.round(viewport.zoom * 4))
+            const pixel = latLngToPixels(point.lat, point.lng, baseZoom)
             const t = (point.value - minValue) / (maxValue - minValue || 1)
             const fill = getHeatmapColor(point.value, minValue, maxValue, heatmapColor)
 
@@ -387,19 +385,27 @@ export const MapCanvas = React.forwardRef<HTMLDivElement, MapCanvasProps>(
           })}
         </g>
       )
-    }, [mode, heatmapData, heatmapColor, viewport.zoom])
+    }, [mode, heatmapData, heatmapColor, baseZoom])
 
     const renderTiles = useCallback(() => {
       if (!tileUrl || !containerSize) return null
 
-      const zoom = Math.min(Math.max(Math.floor(viewport.zoom * 4), 0), 28)
-      const n = Math.pow(2, zoom)
+      // Tiles come from the integer zoom level nearest the effective zoom on screen
+      // (baseZoom + log2(scale)), placed in the same projection as the content.
+      const tileZoom = Math.min(Math.max(Math.round(baseZoom + Math.log2(viewport.zoom)), 0), 28)
+      const n = Math.pow(2, tileZoom)
+      const tileWorldSize = 256 * Math.pow(2, baseZoom - tileZoom)
 
-      // Calculate visible tile range
-      const xStart = Math.max(0, Math.floor(-viewport.x / (256 * viewport.zoom)))
-      const yStart = Math.max(0, Math.floor(-viewport.y / (256 * viewport.zoom)))
-      const xEnd = Math.min(n, Math.ceil((containerSize.width - viewport.x) / (256 * viewport.zoom)))
-      const yEnd = Math.min(n, Math.ceil((containerSize.height - viewport.y) / (256 * viewport.zoom)))
+      // Visible world rectangle, in projection pixels
+      const left = -viewport.x / viewport.zoom
+      const top = -viewport.y / viewport.zoom
+      const right = (containerSize.width - viewport.x) / viewport.zoom
+      const bottom = (containerSize.height - viewport.y) / viewport.zoom
+
+      const xStart = Math.max(0, Math.floor(left / tileWorldSize))
+      const yStart = Math.max(0, Math.floor(top / tileWorldSize))
+      const xEnd = Math.min(n, Math.ceil(right / tileWorldSize))
+      const yEnd = Math.min(n, Math.ceil(bottom / tileWorldSize))
 
       const getTileUrl = typeof tileUrl === 'function' ? tileUrl : (x: number, y: number, z: number) => {
         return (tileUrl as string).replace('{x}', String(x)).replace('{y}', String(y)).replace('{z}', String(z))
@@ -408,22 +414,22 @@ export const MapCanvas = React.forwardRef<HTMLDivElement, MapCanvasProps>(
       const tiles = []
       for (let x = xStart; x < xEnd; x++) {
         for (let y = yStart; y < yEnd; y++) {
-          const url = getTileUrl(x, y, zoom)
+          const url = getTileUrl(x, y, tileZoom)
           tiles.push(
             <image
-              key={`${zoom}-${x}-${y}`}
+              key={`${tileZoom}-${x}-${y}`}
               href={url}
-              x={x * 256}
-              y={y * 256}
-              width={256}
-              height={256}
+              x={x * tileWorldSize}
+              y={y * tileWorldSize}
+              width={tileWorldSize}
+              height={tileWorldSize}
               data-testid={`tile-${x}-${y}`}
             />
           )
         }
       }
       return tiles
-    }, [tileUrl, containerSize, viewport])
+    }, [tileUrl, containerSize, viewport, baseZoom])
 
     const handleRef = (el: HTMLDivElement | null) => {
       if (typeof ref === 'function') ref(el)

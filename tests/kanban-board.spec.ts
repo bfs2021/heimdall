@@ -14,6 +14,48 @@ test.describe("integration: KanbanBoard Component", () => {
     await assertFontsLoaded(page);
   });
 
+  // tinkermonkey/heimdall#298: onMoveCard's index must be the card's final position for pointer
+  // drags too. Within its own column, a downward drop used to report one slot too high, so the
+  // test page's remove-then-insert handler landed the card one slot low.
+  test.describe("Pointer reordering within a column", () => {
+    const BACKLOG = '[data-column-id="backlog"] .kanban-column__body .kanban-card';
+    const TITLES = ["Add user authentication", "Fix button alignment issue", "Implement dark mode"];
+
+    async function backlogOrder(page: import("@playwright/test").Page) {
+      const texts = await page.locator(BACKLOG).allInnerTexts();
+      return texts.map((t) => TITLES.find((title) => t.includes(title)) ?? "other").slice(0, 3);
+    }
+
+    // Drag card `from` and release just above the vertical midpoint of card `to` (or below the
+    // last one), with intermediate moves so pointermove fires.
+    async function dragWithinBacklog(page: import("@playwright/test").Page, from: number, to: number, below = false) {
+      const cards = page.locator(BACKLOG);
+      const src = await cards.nth(from).boundingBox();
+      const dst = await cards.nth(to).boundingBox();
+      if (!src || !dst) throw new Error("card not laid out");
+      const x = src.x + src.width / 2;
+      const y = below ? dst.y + dst.height * 0.9 : dst.y + dst.height * 0.2;
+      await page.mouse.move(x, src.y + src.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(x, (src.y + y) / 2, { steps: 4 });
+      await page.mouse.move(x, y, { steps: 4 });
+      await page.mouse.up();
+    }
+
+    test("dragging down drops the card in the slot under the pointer", async ({ page }) => {
+      expect(await backlogOrder(page)).toEqual(TITLES);
+      // First card dropped between the second and third.
+      await dragWithinBacklog(page, 0, 2);
+      await expect.poll(() => backlogOrder(page)).toEqual([TITLES[1], TITLES[0], TITLES[2]]);
+    });
+
+    test("dragging up drops the card in the slot under the pointer", async ({ page }) => {
+      // Third card dropped above the first.
+      await dragWithinBacklog(page, 2, 0);
+      await expect.poll(() => backlogOrder(page)).toEqual([TITLES[2], TITLES[0], TITLES[1]]);
+    });
+  });
+
   test.describe("Rendering and Layout", () => {
     test("should render all columns with headers, titles, and count chips", async ({
       page,

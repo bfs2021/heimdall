@@ -697,8 +697,9 @@ function SiteMap({ pins, track, density }: { pins: MapPin[]; track: MapTrackPoin
 
 - Because of the discriminated union, switch modes by rendering a separate `<MapCanvas>` per mode (as above); passing `pins` together with `mode="track"` is a type error.
 - The root is `width: 100%; height: 100%; min-height: 360px`. Give the parent a height.
-- The initial view is fitted once, from `bounds` or else from the data extent, after the container is first measured. Later changes to `bounds` or data do not re-fit. In the current release the fit does not reliably frame the data (the pins-mode visual baseline shows no pins in view), so check the result on screen.
-- `minZoom`, `maxZoom` and the `zoom` passed to `onViewportChange` are the pan/zoom scale factor (1 = initial), not slippy-map zoom levels. The tile `z` sent to `tileUrl` is `floor(scale × 4)`, clamped to 0–28.
+- The initial view is fitted once, from `bounds` or else from the data extent, after the container is first measured: the data is framed with 60px padding (less in small containers) and centred. A single point opens at zoom level 12, and the fit never zooms in past level 16; with no data and no `bounds` the whole world is shown. Later changes to `bounds` or data do not re-fit.
+- `minZoom`, `maxZoom` and the `zoom` passed to `onViewportChange` are the pan/zoom scale factor (1 = the fitted initial view), not slippy-map zoom levels. `center` is the map point under the middle of the view. The tile `z` sent to `tileUrl` is the integer slippy-map level nearest the zoom on screen, clamped to 0–28.
+- `+`/`-` keyboard zoom scales about the top-left corner of the map, not the view centre; wheel and pinch zoom anchor on the pointer.
 - A string `tileUrl` substitutes the first `{x}`, `{y}` and `{z}`. There is no default tile server; without `tileUrl` a grid pattern renders.
 - Pin popovers open only from a click on a pin. Setting `selectedPinId` from outside highlights the pin but shows no popover. Escape closes the popover and calls `onSelectPin(null)`; clicking the map background does not deselect.
 - The popover shows `label`, `timestamp` and `detail`, and traps focus while open.

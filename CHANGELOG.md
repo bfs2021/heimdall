@@ -4,7 +4,32 @@ All notable changes to `@tinkermonkey/heimdall-ui` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.9.1]
+
+Bug fixes for `MapCanvas`, `LineChart` and `KanbanBoard`, and agent skills regenerated to cover
+every public export.
+
+### Fixed
+
+- **`MapCanvas`** — the initial view now fits the data (tinkermonkey/heimdall#296). It used to open
+  on an empty grid at the top-left of the world with pins, tracks and heatmaps off-screen: the fit
+  misread its own zoom calculation, never applied the zoom it computed, and panned in a different
+  coordinate space from the one content is drawn in. Content is now projected once, at the level
+  that frames the data (or `bounds`) with 60px padding at scale 1, and centred; a single point
+  opens at level 12, the fit stops at level 16, and no data shows the whole world. Zooming only
+  scales that projection, so it no longer jumps as you zoom. Tiles come from the integer level
+  nearest the on-screen zoom. `onViewportChange`'s `center` is now the map point under the middle
+  of the view; `zoom` is still the scale factor, 1 being the fitted view.
+- **`usePanZoom`** — `onViewportChange` no longer fires again just because the callback's identity
+  changed. A caller that set state from an inline callback, the usual way to write it, re-rendered
+  forever (`MapCanvas` with an inline `onViewportChange` logged "Maximum update depth exceeded").
+- **`LineChart`** — no longer throws when `series` switches between empty and non-empty data
+  (tinkermonkey/heimdall#297). A hook ran after the empty-data early return, so the hook count
+  changed between renders.
+- **`KanbanBoard`** — `onMoveCard`'s `index` is now the card's final position for pointer drags
+  downward within the card's own column too (tinkermonkey/heimdall#298). It was one slot too high,
+  so a remove-then-insert handler landed the card one slot low. Keyboard and cross-column moves
+  were already correct.
 
 ### Added
 
@@ -44,7 +69,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (two new categories: observability, planning). Prop tables use backticked names so the checker
   can read them.
 - **README** — new "Agent skills" section with setup instructions and the skill list.
-
 - **`agent-skills/heimdall-graph`** — brought up to date with 0.9.0. The skill now covers all
   eight `GraphCanvas` layouts (what data each suits, the props it reads, and its limits; `organic`
   and `orthogonal` are marked proof of concept), the hierarchy and collapse props,

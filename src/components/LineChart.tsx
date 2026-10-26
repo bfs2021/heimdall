@@ -72,6 +72,9 @@ export const LineChart = React.forwardRef<SVGSVGElement, LineChartProps>(
   ) => {
     const T = TONE[tone]
     const gradBaseId = React.useId()
+    // Every hook must run before the empty-data early return below, or a chart whose data goes
+    // from empty to non-empty (or back) changes its hook count between renders and React throws.
+    const [hover, setHover] = React.useState<number | null>(null)
     const cs = colors ?? (series.length === 1 ? [SERIES_COLORS[0]] : SERIES_COLORS)
 
     const pad = {
@@ -106,8 +109,6 @@ export const LineChart = React.forwardRef<SVGSVGElement, LineChartProps>(
 
     const yTickVals: number[] = []
     for (let i = 0; i <= ticks; i++) yTickVals.push(lo + (i / ticks) * (hi - lo))
-
-    const [hover, setHover] = React.useState<number | null>(null)
 
     function onMove(e: React.MouseEvent<SVGSVGElement>) {
       const rect = e.currentTarget.getBoundingClientRect()
