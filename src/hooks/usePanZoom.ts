@@ -124,6 +124,17 @@ export function usePanZoom({
   const keyRafRef = useRef<number | null>(null)
   const inertiaRafRef = useRef<number | null>(null)
 
+  // Inertia keeps its own `currentPan`, captured when the glide started. Any
+  // deliberate viewport change (wheel, keys, toolbar zoom/pan, reset) must stop
+  // it first, or the next frame overwrites the new pan with one computed for
+  // the old zoom — the "wheel zooms around an unrelated point" case in #306.
+  const cancelInertia = useCallback(() => {
+    if (inertiaRafRef.current !== null) {
+      cancelAnimationFrame(inertiaRafRef.current)
+      inertiaRafRef.current = null
+    }
+  }, [])
+
   // Keep refs current for event handlers
   useEffect(() => {
     zoomRef.current = zoom
@@ -260,10 +271,7 @@ export function usePanZoom({
 
   const handlePointerDown = useCallback((e: React.PointerEvent<HTMLElement>) => {
     if (lockedRef.current) return
-    if (inertiaRafRef.current !== null) {
-      cancelAnimationFrame(inertiaRafRef.current)
-      inertiaRafRef.current = null
-    }
+    cancelInertia()
 
     dragRef.current = {
       x: e.clientX,
@@ -277,7 +285,7 @@ export function usePanZoom({
       time: performance.now(),
     }
     attachListeners()
-  }, [attachListeners])
+  }, [attachListeners, cancelInertia])
 
   // Keep refs in sync with the current implementations
   useEffect(() => {
@@ -313,6 +321,7 @@ export function usePanZoom({
   const handleWheel = useCallback((e: WheelEvent) => {
     if (lockedRef.current) return
     e.preventDefault()
+    cancelInertia()
 
     const container = e.currentTarget as HTMLElement
     const rect = container.getBoundingClientRect()
@@ -326,6 +335,12 @@ export function usePanZoom({
     const anchored = anchoredPan(cx, cy, prev, next, panRef.current)
     const newPan = clampPan(anchored.x, anchored.y)
 
+    // Write the refs now, not after the next passive effect: wheel events that
+    // arrive within one frame then compound instead of all reading the same
+    // base and dropping the earlier deltas.
+    zoomRef.current = next
+    panRef.current = newPan
+
     if (wheelRafRef.current !== null) {
       cancelAnimationFrame(wheelRafRef.current)
     }
@@ -335,7 +350,7 @@ export function usePanZoom({
       setPan(newPan)
       wheelRafRef.current = null
     })
-  }, [clampPan, minZoom, maxZoom])
+  }, [cancelInertia, clampPan, minZoom, maxZoom])
 
   // A real, non-passive native listener — see UsePanZoomOptions.containerRef.
   useEffect(() => {
@@ -373,6 +388,16 @@ export function usePanZoom({
       }
 
       if (updateZoom !== null || updatePan !== null) {
+        cancelInertia()
+
+        // Same synchronous-target rule as the wheel handler.
+        if (updateZoom !== null) {
+          zoomRef.current = updateZoom
+        }
+        if (updatePan !== null) {
+          panRef.current = updatePan
+        }
+
         if (keyRafRef.current !== null) {
           cancelAnimationFrame(keyRafRef.current)
         }
@@ -388,7 +413,7 @@ export function usePanZoom({
         })
       }
     },
-    [clampPan, minZoom, maxZoom]
+    [cancelInertia, clampPan, minZoom, maxZoom]
   )
 
   const zoomTo = useCallback(
@@ -396,28 +421,37 @@ export function usePanZoom({
       const clamped = Math.min(maxZoom, Math.max(minZoom, targetZoom))
       const prev = zoomRef.current
 
+      cancelInertia()
+      zoomRef.current = clamped
       setZoom(clamped)
 
       if (cx !== undefined && cy !== undefined) {
         const anchored = anchoredPan(cx, cy, prev, clamped, panRef.current)
-        setPan(clampPan(anchored.x, anchored.y))
+        const newPan = clampPan(anchored.x, anchored.y)
+        panRef.current = newPan
+        setPan(newPan)
       }
     },
-    [clampPan, minZoom, maxZoom]
+    [cancelInertia, clampPan, minZoom, maxZoom]
   )
 
   const panTo = useCallback(
     (x: number, y: number) => {
+      cancelInertia()
       const newPan = clampPan(x, y)
+      panRef.current = newPan
       setPan(newPan)
     },
-    [clampPan]
+    [cancelInertia, clampPan]
   )
 
   const reset = useCallback(() => {
+    cancelInertia()
+    zoomRef.current = 1
+    panRef.current = { x: 0, y: 0 }
     setZoom(1)
     setPan({ x: 0, y: 0 })
-  }, [])
+  }, [cancelInertia])
 
   // matrix(a, b, c, d, e, f) represents:
   // | a  c  e |
